@@ -127,3 +127,9 @@ dmypy.json
 
 # Pyre type checker
 .pyre/
+
+.project
+.pydevproject
+Test.html
+Test.txt
+credentials.json
