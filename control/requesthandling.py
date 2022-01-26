@@ -15,9 +15,11 @@ class RequestHandler():
     '''
     classdocs
     '''
-    def __init__(self, storage):
+    def __init__(self, storage, timeout_default=dt.timedelta(hours=3)):
         self._storage = storage
         self._session = requests.Session()
+        
+        self._timeout_default = timeout_default
         
     def add_request (self, url, headers={}, min_date=None, max_date=None):
         url = URL.of_string(url)
@@ -40,48 +42,52 @@ class RequestHandler():
     
     def get_response (self, url, headers={}, min_date=None, max_date=None):
         request_id = self.add_request(url, headers, min_date, max_date)
-        print("Request ID: "+str(request_id))
+        latest_response = self._storage.get_latest_response (request_id, status_code=200)
+        return latest_response
+    
+    def _execute_web_request (self, request_index, url, header):
+        d = dt.datetime.now()
+        
+        with self._session as s:
+            requests_response = s.get(url, headers=header)
+            
+        response = Response.of_response(None, requests_response)
+        self._storage.direct_insert_response(request_index, d, response)
     
     def _execute_pending_requests (self):
         df = self._storage.get_requests_without_responses()
         
+        for indx in df.index.get_level_values("RequestId"):
+            row = df.xs(indx, axis=0, level="RequestId").iloc[0]
+            header = json.loads(row.loc["Header"])
+            url = row.loc["URL"]
+            
+            self._execute_web_request(indx, url, header)
+    
+    def fill_default_domain_timeouts (self):
+        unset_domain_ids = self._storage.get_domain_ids_without_domain_timeouts()
+        timeouts = [
+                self._timeout_default
+                for _ in unset_domain_ids
+            ]
+        
+        self._storage.direct_insert_domain_timeout(unset_domain_ids, timeouts)
+    
+    def execute_failing_requests (self):
+        df = self._storage.get_retryable_failing_request()
+        
         print(df)
         
-        for indx in df.index.values:
-            row = df.loc[indx]
+        for request_id in df.index.get_level_values("RequestId"):
+            row = df.xs(request_id, axis=0, level="RequestId").iloc[0]
             
             header = json.loads(row.loc["Header"])
             url = row.loc["URL"]
             
-            with self._session as s:
-                requests_response = s.get(url, headers=header)
-                
-            d = dt.datetime.now()
-            response = Response.of_response(None, requests_response)
-            
-            self._storage.direct_insert_response(indx, d, response)
-
-    def _execute_failing_requests (self):
-        df = self._storage.get_requests_without_coded_responses(200)
-        print(df)
-        
-        for request_id in df.index.values:
-            row = df.loc[request_id]
-            
-            header = json.loads(row.loc["Header"])
-            url = row.loc["URL"]
-            
-            # latest_response = self._storage.get_latest_response(request_id)
-            
-            with self._session as s:
-                requests_response = s.get(url, headers=header)
-                
-            d = dt.datetime.now()
-            response = Response.of_response(None, requests_response)
-            
-            self._storage.direct_insert_response(request_id, d, response)
+            self._execute_web_request(request_id, url, header)
     
     def execute_requests (self):
         self._execute_pending_requests()
-        self._execute_failing_requests()
+        self.fill_default_domain_timeouts()
+        self.execute_failing_requests()
         

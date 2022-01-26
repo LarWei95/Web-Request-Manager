@@ -11,7 +11,7 @@ import pandas as pd
 import json
 from io import BytesIO
 import gzip
-import re
+import datetime as dt
 
 class URL ():
     def __init__ (self, urlparsed, path_checksum, query_checksum):
@@ -74,15 +74,72 @@ class Response ():
             content = None
             
         return Response(request, status_code, headers, content)
-
+    
 class Storage ():
     DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+    TIME_FORMAT = "%H:%M:%S"
     
-    FULLREQUEST_COLUMNS = ["RequestId", "UrlId", "DomainId", "Scheme", "Netloc",
+    FULLREQUEST_QUERY = """SELECT 
+                req.requestid, req.urlid, 
+                url.domainid, req.headerid,
+                d.scheme, d.netloc, 
+                url.path, url.query, 
+                reqh.header, req.date,
+                CONCAT(d.scheme, 
+                    "://", d.netloc, 
+                    url.path, 
+                    IF(url.query != "", 
+                        CONCAT("?", url.query), 
+                        url.query)
+                ) "url"
+        FROM request AS req 
+        INNER JOIN url 
+            ON req.urlid = url.urlid 
+        INNER JOIN domain AS d 
+            ON url.domainid = d.domainid 
+        INNER JOIN request_header AS reqh 
+            ON req.headerid = reqh.headerid"""
+    FULLREQUEST_COLUMNS = ["RequestId", "UrlId", "DomainId", "HeaderId", "Scheme", "Netloc",
                            "Path", "Query", "Header", "Timestamp", "URL"]
-    FULLREQUEST_INDEX = "RequestId"
+    FULLREQUEST_INDEX = ["RequestId", "UrlId", "DomainId", "HeaderId"]
+    
+    DOMAINSTATUS_QUERY = """SELECT 
+            d.domainid, reqh.headerid, 
+            d.scheme, d.netloc, reqh.header,
+            MAX(resp.requested) "requested",
+            req.requestid,
+            resp.statuscode
+        FROM response AS resp
+        INNER JOIN request AS req
+            ON resp.requestid = req.requestid
+        INNER JOIN request_header AS reqh
+            ON req.headerid = reqh.headerid
+        INNER JOIN url
+            ON req.urlid = url.urlid
+        INNER JOIN domain AS d
+            ON url.domainid = d.domainid
+        GROUP BY d.domainid, reqh.headerid
+    """
+    DOMAINSTATUS_COLUMNS = ["DomainId", "HeaderId", "Scheme", "Netloc", 
+                            "Header", "Timestamp", "RequestId", "Statuscode"]
+    DOMAINSTATUS_INDEX = ["DomainId", "HeaderId"]
+    
+    LATESTTIMEOUT_QUERY = """SELECT dt.domainid, dt.timeout_set, dt.timeout
+        FROM domain_timeout AS dt
+        INNER JOIN 
+            (SELECT dtt.domainid, MAX(dtt.timeout_set) "timeout_set"
+            FROM domain_timeout AS dtt
+            GROUP BY dtt.domainid) temp
+        ON dt.domainid = temp.domainid AND dt.timeout_set = temp.timeout_set"""
+    DOMAINTIMEOUT_COLUMNS = ["DomainId", "TimeoutSet", "Timeout"]
+    DOMAINTIMEOUT_INDEX = ["DomainId", "TimeoutSet"]
+    
+    RETRY_COLUMN = "Retry"
     
     URLPARSE_REVERT = "{:s}://{:s}{:s}{:s}"
+    
+    
+    
     
     def __init__ (self, host, user, passwd, db_name="webrequest"):
         self._con = mysql.connector.connect(
@@ -136,7 +193,7 @@ class Storage ():
         self._con.commit()
         
     def _create_request_header_table (self):
-        sql = """CREATE TABLE IF NOT EXISTS requestheader (
+        sql = """CREATE TABLE IF NOT EXISTS request_header (
             headerid INTEGER UNSIGNED AUTO_INCREMENT,
             headerchecksum BINARY(16) NOT NULL,
             header TEXT NOT NULL,
@@ -160,7 +217,7 @@ class Storage ():
                     ON DELETE CASCADE
                     ON UPDATE NO ACTION,
             FOREIGN KEY (headerid)
-                REFERENCES requestheader(headerid)
+                REFERENCES request_header(headerid)
                     ON DELETE CASCADE
                     ON UPDATE NO ACTION,
             CONSTRAINT unique_request UNIQUE (urlid, headerid, date)
@@ -186,45 +243,31 @@ class Storage ():
         self._cur.execute(sql)
         self._con.commit()
         
+    def _create_domain_timeout_table (self):
+        sql = """CREATE TABLE IF NOT EXISTS domain_timeout ( 
+            domainid INTEGER UNSIGNED NOT NULL,
+            timeout_set DATETIME NOT NULL,
+            timeout TIME NOT NULL,
+            
+            PRIMARY KEY (domainid, timeout_set),
+            FOREIGN KEY (domainid)
+                REFERENCES domain(domainid)
+                    ON DELETE CASCADE
+                    ON UPDATE CASCADE,
+            CONSTRAINT unique_domain_timeout UNIQUE (domainid, timeout_set)
+        );"""
+        self._cur.execute(sql)
+        self._con.commit()
+        
     def _create_full_request_view (self):
-        sql = """CREATE VIEW IF NOT EXISTS fullrequest AS 
-        SELECT 
-                req.requestid, req.urlid, 
-                url.domainid, d.scheme, 
-                d.netloc, 
-                url.path, url.query, 
-                reqh.header, req.date,
-                CONCAT(d.scheme, 
-                    "://", d.netloc, 
-                    url.path, 
-                    IF(url.query != "", 
-                        CONCAT("?", url.query), 
-                        url.query)
-                ) "url"
-        FROM request AS req 
-        INNER JOIN url 
-            ON req.urlid = url.urlid 
-        INNER JOIN domain AS d 
-            ON url.domainid = d.domainid 
-        INNER JOIN requestheader AS reqh 
-            ON req.headerid = reqh.headerid"""
+        sql = """CREATE VIEW IF NOT EXISTS full_request AS 
+        {:s};""".format(Storage.FULLREQUEST_QUERY)
         self._cur.execute(sql)
         self._con.commit()
         
     def _create_domain_status_view (self):
-        sql = """CREATE VIEW IF NOT EXISTS domainstatus AS
-        SELECT 
-            d.domainid, d.scheme, d.netloc,
-            MAX(resp.requested) "requested",
-            resp.statuscode
-        FROM response AS resp
-        INNER JOIN request AS req
-            ON resp.requestid = req.requestid
-        INNER JOIN url
-            ON req.urlid = url.urlid
-        INNER JOIN domain AS d
-            ON url.domainid = d.domainid
-        GROUP BY d.domainid;"""
+        sql = """CREATE VIEW IF NOT EXISTS domain_status AS
+        {:s};""".format(Storage.DOMAINSTATUS_QUERY)
         self._cur.execute(sql)
         self._con.commit()
         
@@ -237,6 +280,7 @@ class Storage ():
         self._create_request_header_table()
         self._create_request_table()
         self._create_response_table()
+        self._create_domain_timeout_table()
         
         self._create_full_request_view()
         self._create_domain_status_view()
@@ -440,7 +484,7 @@ class Storage ():
             CONSTRAINT unique_headerchecksum UNIQUE (headerchecksum)
         '''
         
-        sql = """INSERT INTO requestheader (headerchecksum, header)
+        sql = """INSERT INTO request_header (headerchecksum, header)
         VALUES {:s};"""
         
         fmt = "(X\'{:s}\',\"{:s}\")"
@@ -468,7 +512,7 @@ class Storage ():
     def get_request_header_id (self, request_header):
         if isinstance(request_header, RequestHeader):
             sql = """SELECT headerid
-            FROM requestheader
+            FROM request_header
             WHERE headerchecksum = X'{:s}';          
             """.format(request_header.header_checksum.hex())
             
@@ -631,9 +675,9 @@ class Storage ():
             return existing_id
         
     def direct_insert_response (self, request_id, timestamp, response):
-        content = response.content
-        
         if isinstance(response, Response):
+            content = response.content
+            
             if content is None:
                 content = "NULL"
             else:
@@ -786,11 +830,7 @@ class Storage ():
         else:
             conditions = ""
             
-        return conditions
-        
-    def get_response (self, response_id=None, request_id=None, timestamp=None):
-        pass
-    
+        return conditions    
     
     def get_latest_response (self, request_id, status_code=None):
         if status_code is None:
@@ -798,63 +838,43 @@ class Storage ():
         else:
             sc_sql = " AND statuscode = {:d}".format(status_code)
         
-        sql = """SELECT responseid, requested, statuscode, header, content
+        sql = """SELECT responseid, requestid, requested, statuscode, header, content
         FROM response
         WHERE requestid = {:d}{:s}
         ORDER BY requested DESC LIMIT 1;
         """.format(request_id, sc_sql)
-        
         self._cur.execute(sql)
         rows = self._cur.fetchall()
         
         
         if len(rows) == 1:
-            df = pd.Series(rows[0], index=["ResponseId", "Timestamp", "StatusCode", "Header", "Content"])
+            df = pd.Series(rows[0], index=["ResponseId", "RequestId", "Timestamp", "StatusCode", "Header", "Content"])
         else:
             df = None
         
         return df
     
     @classmethod
-    def _prepare_fullrequest_dataframe (cls, rows):
-        df = pd.DataFrame(rows, columns=Storage.FULLREQUEST_COLUMNS)
+    def _prepare_fullrequest_dataframe (cls, rows, additional_columns=[]):
+        all_columns = Storage.FULLREQUEST_COLUMNS + additional_columns
+        
+        df = pd.DataFrame(rows, columns=all_columns)
         df = df.set_index(Storage.FULLREQUEST_INDEX)
-        '''
-        full_urls = []
         
-        for indx in df.index.values:
-            row = df.loc[indx]
-            
-            scheme = row["Scheme"]
-            netloc = row["Netloc"]
-            path = row["Path"]
-            query = row["Query"]
-            
-            if query != "":
-                query = "?"+query
-            
-            url = cls.URLPARSE_REVERT.format(
-                    scheme, netloc,
-                    path, query
-                )
-            full_urls.append(url)
-        
-        df["URL"] = full_urls
-        '''
         return df
         
     def get_requests_without_responses (self):
         sql = """SELECT
-            fr.requestid, fr.urlid, fr.domainid,
+            fr.requestid, fr.urlid, fr.domainid, fr.headerid,
             fr.scheme, fr.netloc, fr.path, fr.query,
             fr.header,
             fr.date, fr.url
-        FROM fullrequest AS fr
+        FROM ({:s}) fr
         LEFT JOIN response AS resp
             ON fr.requestid = resp.requestid
         GROUP BY fr.requestid
         HAVING COUNT(resp.responseid) = 0;
-        """
+        """.format(Storage.FULLREQUEST_QUERY)
         
         self._cur.execute(sql)
         rows = self._cur.fetchall()
@@ -863,18 +883,160 @@ class Storage ():
         
         return df
     
-    def get_requests_without_coded_responses (self, status_code=200):
+    @classmethod
+    def query_requests_without_coded_responses (cls, status_code=200):
         sql = """SELECT
-            fr.requestid, fr.urlid, fr.domainid,
+            fr.requestid, fr.urlid, fr.domainid, fr.headerid,
             fr.scheme, fr.netloc, fr.path, fr.query,
             fr.header,
             fr.date, fr.url
-        FROM fullrequest AS fr
+        FROM ({:s}) fr
         LEFT JOIN response AS resp
             ON (fr.requestid = resp.requestid AND resp.statuscode = {:d})
         GROUP BY fr.requestid
-        HAVING COUNT(resp.responseid) = 0;
-        """.format(status_code)
+        HAVING COUNT(resp.responseid) = 0
+        """.format(cls.FULLREQUEST_QUERY, status_code)
+        return sql
+    
+    def get_requests_without_coded_responses (self, status_code=200):
+        sql = "{:s};".format(
+                Storage.query_requests_without_coded_responses(status_code)
+            )
+        
+        self._cur.execute(sql)
+        rows = self._cur.fetchall()
+        
+        df = Storage._prepare_fullrequest_dataframe(rows)
+        
+        return df
+    
+    def get_domain_status (self):
+        sql = "{:s};".format(Storage.DOMAINSTATUS_QUERY)
+        
+        self._cur.execute(sql)
+        rows = self._cur.fetchall()
+        
+        df = pd.DataFrame(rows, columns=Storage.DOMAINSTATUS_COLUMNS)
+        df = df.set_index(Storage.DOMAINSTATUS_INDEX)
+        return df        
+    
+    @classmethod
+    def timedelta_to_string (cls, td):
+        total_secs = int(td.total_seconds())
+        
+        positive = total_secs >= 0
+        positive = "" if positive == True else "-"
+        
+        total_secs = np.abs(total_secs).astype(int)
+        
+        hours, total_secs = divmod(total_secs, 3600)
+        minutes, seconds = divmod(total_secs, 60)
+        
+        td = "{:s}{:02d}:{:02d}:{:02d}".format(
+                positive, hours, 
+                minutes, seconds)
+        
+        return td
+    
+    def direct_insert_domain_timeout (self, domain_id, timeout):
+        fmt = "({:d}, NOW(), \"{:s}\")"
+        sql = """INSERT INTO domain_timeout (domainid, timeout_set, timeout)
+            VALUES {:s};"""
+        
+        if isinstance(timeout, dt.timedelta):
+            timeout = Storage.timedelta_to_string(timeout)
+            
+            sql = sql.format(fmt.format(domain_id, timeout))
+        else:
+            if len(timeout) != 0:
+                fmt = ",".join(
+                        fmt.format(di, Storage.timedelta_to_string(to))
+                        for di, to in zip(domain_id, timeout)
+                    )
+                sql = sql.format(fmt)
+            else:
+                return
+            
+        print(sql)
+            
+        self._cur.execute(sql)
+        self._con.commit()
+        
+    def get_latest_domain_timeout (self):
+        sql = """{:s};""".format(Storage.LATESTTIMEOUT_QUERY)
+        
+        self._cur.execute(sql)
+        rows = self._cur.fetchall()
+        
+        df = pd.DataFrame(rows, columns=Storage.DOMAINTIMEOUT_COLUMNS)
+        df = df.set_index(Storage.DOMAINTIMEOUT_INDEX)
+        
+        return df
+    
+    def get_domain_ids_without_domain_timeouts (self):
+        sql = """SELECT x.domainid
+        FROM 
+        (SELECT d.domainid, SUM(dt.domainid IS NOT NULL) "count"
+        FROM domain AS d
+        LEFT JOIN domain_timeout AS dt
+            ON d.domainid = dt.domainid
+        GROUP BY d.domainid) x
+        WHERE x.count = 0;"""
+        
+        self._cur.execute(sql)
+        rows = self._cur.fetchall()
+        rows = np.array([
+                x[0]
+                for x in rows
+            ])
+        return rows
+    
+    def get_failing_request_timeouts (self, status_code=200):
+        sql = """SELECT 
+            fresp.requestid, fresp.urlid, 
+            fresp.domainid, fresp.headerid,
+            fresp.scheme, fresp.netloc, 
+            fresp.path, fresp.query, 
+            fresp.header, fresp.date,
+            fresp.url,
+            ADDTIME(domstatus.requested, TIME_TO_SEC(ltimeouts.timeout)) "retry"
+        FROM ({:s}) fresp
+        INNER JOIN ({:s}) domstatus
+        ON fresp.domainid = domstatus.domainid AND fresp.headerid = domstatus.headerid
+        INNER JOIN ({:s}) ltimeouts
+        ON fresp.domainid = ltimeouts.domainid
+        """.format(
+                Storage.query_requests_without_coded_responses(status_code),
+                Storage.DOMAINSTATUS_QUERY,
+                Storage.LATESTTIMEOUT_QUERY
+            )
+        
+        self._cur.execute(sql)
+        rows = self._cur.fetchall()
+        
+        df = Storage._prepare_fullrequest_dataframe(rows, [Storage.RETRY_COLUMN])
+        
+        return df
+    
+    def get_retryable_failing_request (self, status_code=200):
+        sql = """SELECT 
+            fresp.requestid, fresp.urlid, 
+            fresp.domainid, fresp.headerid,
+            fresp.scheme, fresp.netloc, 
+            fresp.path, fresp.query, 
+            fresp.header, fresp.date,
+            fresp.url
+        FROM ({:s}) fresp
+        INNER JOIN ({:s}) domstatus
+        ON fresp.domainid = domstatus.domainid AND fresp.headerid = domstatus.headerid
+        INNER JOIN ({:s}) ltimeouts
+        ON fresp.domainid = ltimeouts.domainid
+        WHERE ADDTIME(domstatus.requested, TIME_TO_SEC(ltimeouts.timeout)) <= NOW()
+        """.format(
+                Storage.query_requests_without_coded_responses(status_code),
+                Storage.DOMAINSTATUS_QUERY,
+                Storage.LATESTTIMEOUT_QUERY
+            )
         
         self._cur.execute(sql)
         rows = self._cur.fetchall()
