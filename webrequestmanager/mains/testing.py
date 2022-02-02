@@ -3,15 +3,16 @@ Created on 06.01.2022
 
 @author: larsw
 '''
-from model.storage import Storage, URL, RequestHeader, Request, Response
-from control.requesthandling import RequestHandler
+from webrequestmanager.model.storage import Storage, URL, RequestHeader, Request, Response
+from webrequestmanager.control.requesthandling import RequestHandler
+from webrequestmanager.control.api import WebRequestAPIClient
 import datetime as dt
 import requests
 from pprint import pprint
 import json
 
 def fulltest ():
-    with open("credentials.json", "r") as f:
+    with open("../../credentials.json", "r") as f:
         credentials = json.load(f)
     
     user = credentials["user"]
@@ -88,7 +89,33 @@ def req ():
     print(response.status_code)
     print(response.headers)
 
+def client ():
+    url = "https://docs.python-requests.org/en/latest/user/quickstart/"
+    header = {"User-Agent" : "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:96.0) Gecko/20100101 Firefox/96.0"}
+    min_date = dt.datetime(2022, 1, 1)
+    max_date = dt.datetime(2022, 3, 1)
+    
+    
+    client = WebRequestAPIClient("http://127.0.0.1", 5000)
+    request_id = client.post_page_request(url, header, min_date, max_date)
+    print(request_id)
+    # EXECUTE NECESSARY!
+    
+    response = client.get_response(request_id)
+    pprint(response)
+
+def quick_execute ():
+    with open("../../credentials.json", "r") as f:
+        credentials = json.load(f)
+    
+    user = credentials["user"]
+    password = credentials["password"]
+    
+    storage = Storage("localhost", user, password)
+    request_handler = RequestHandler(storage)
+    request_handler.execute_requests()
+
 if __name__ == '__main__':
-    execute_failing_test()
+    client()
     
     

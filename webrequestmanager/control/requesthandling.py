@@ -3,13 +3,10 @@ Created on 13.01.2022
 
 @author: larsw
 '''
-from model.storage import URL, RequestHeader, Request, Response
+from webrequestmanager.model.storage import URL, RequestHeader, Request, Response
 import datetime as dt
-from urllib.parse import urlparse
 import json
 import requests
-import gzip
-from io import BytesIO
 
 class RequestHandler():
     '''
@@ -31,7 +28,7 @@ class RequestHandler():
         request_id = self._storage.insert_request(request,
                                                   min_date=min_date,
                                                   max_date=max_date)
-        return request_id
+        return int(request_id)
     
     def add_response (self, request_id, request, timestamp, requests_response):
         response = Response.of_response(request, requests_response)
@@ -40,8 +37,14 @@ class RequestHandler():
                                                            response)
         return response_id
     
-    def get_response (self, url, headers={}, min_date=None, max_date=None):
-        request_id = self.add_request(url, headers, min_date, max_date)
+    def get_response (self, url=None, headers={}, min_date=None, max_date=None, request_id=None):
+        if url is None and request_id is None:
+            errmsg = "Both URL and request id are None."
+            raise ValueError(errmsg)
+        
+        if request_id is None:
+            request_id = self.add_request(url, headers, min_date, max_date)
+        
         latest_response = self._storage.get_latest_response (request_id, status_code=200)
         return latest_response
     
