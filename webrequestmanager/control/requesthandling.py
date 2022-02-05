@@ -37,7 +37,7 @@ class RequestHandler():
                                                            response)
         return response_id
     
-    def get_response (self, url=None, headers={}, min_date=None, max_date=None, request_id=None):
+    def get_response (self, url=None, headers={}, min_date=None, max_date=None, request_id=None):                
         if url is None and request_id is None:
             errmsg = "Both URL and request id are None."
             raise ValueError(errmsg)

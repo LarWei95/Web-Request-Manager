@@ -4,6 +4,7 @@ Created on 12.01.2022
 @author: larsw
 '''
 import mysql.connector
+from mysql.connector import RefreshOption
 from urllib.parse import urlparse
 import hashlib
 import numpy as np
@@ -75,6 +76,28 @@ class Response ():
             
         return Response(request, status_code, headers, content)
     
+class _DBCon ():
+    def __init__ (self, host, user, passwd, db_name):
+        self._host = host
+        self._user = user
+        self._passwd = passwd
+        self._db_name = db_name
+        
+        self._con = None
+        
+    def __enter__ (self):
+        self._con = mysql.connector.connect(
+                host=self._host,
+                user=self._user,
+                password=self._passwd,
+                database=self._db_name
+            )
+        return self._con.cursor()
+    
+    def __exit__ (self, exc_type, exc_val, exc_tb):
+        self._con.commit()
+        self._con.close()
+    
 class Storage ():
     DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
     TIME_FORMAT = "%H:%M:%S"
@@ -138,31 +161,28 @@ class Storage ():
     
     URLPARSE_REVERT = "{:s}://{:s}{:s}{:s}"
     
-    
-    
-    
     def __init__ (self, host, user, passwd, db_name="webrequest"):
-        self._con = mysql.connector.connect(
-                host=host,
-                user=user,
-                password=passwd
-            )
-        self._cur = self._con.cursor()
-        
-        self.db_name = db_name
-        
+        self._host = host
+        self._user = user
+        self._passwd = passwd
+        self._db_name = db_name
+                
+        self._con = None
+                
         self._initialize()
         
-    def _create_database (self, db_name):
-        sql = "CREATE DATABASE IF NOT EXISTS {:s};".format(
-                db_name
-            )
-        self._cur.execute(sql)
-        self._con.commit()
+    def _create_database (self):
+        self._con = _DBCon(self._host, self._user, self._passwd, None)
         
-        self._cur.execute("USE {:s};".format(db_name))
+        with self._con as cur:
+            sql = "CREATE DATABASE IF NOT EXISTS {:s};".format(
+                    self._db_name
+                )
+            cur.execute(sql)
+            
+        self._con = _DBCon(self._host, self._user, self._passwd, self._db_name)
         
-    def _create_domain_table (self):
+    def _create_domain_table (self, cur):
         sql = """CREATE TABLE IF NOT EXISTS domain (
             domainid INTEGER UNSIGNED AUTO_INCREMENT,
             scheme CHAR(16),
@@ -170,10 +190,9 @@ class Storage ():
             PRIMARY KEY (domainid),
             CONSTRAINT scheme_netloc_pair UNIQUE (scheme, netloc)
         );"""
-        self._cur.execute(sql)
-        self._con.commit()
+        cur.execute(sql)
         
-    def _create_url_table (self):        
+    def _create_url_table (self, cur):        
         sql = """CREATE TABLE IF NOT EXISTS url (
             urlid INTEGER UNSIGNED AUTO_INCREMENT,
             domainid INTEGER UNSIGNED NOT NULL,
@@ -189,10 +208,9 @@ class Storage ():
                     ON UPDATE NO ACTION,
             CONSTRAINT url_checksum_pair UNIQUE (domainid, pathchecksum, querychecksum)
         );"""
-        self._cur.execute(sql)
-        self._con.commit()
+        cur.execute(sql)
         
-    def _create_request_header_table (self):
+    def _create_request_header_table (self, cur):
         sql = """CREATE TABLE IF NOT EXISTS request_header (
             headerid INTEGER UNSIGNED AUTO_INCREMENT,
             headerchecksum BINARY(16) NOT NULL,
@@ -201,10 +219,9 @@ class Storage ():
             PRIMARY KEY (headerid),
             CONSTRAINT unique_headerchecksum UNIQUE (headerchecksum)
         );"""
-        self._cur.execute(sql)
-        self._con.commit()
+        cur.execute(sql)
         
-    def _create_request_table (self):
+    def _create_request_table (self, cur):
         sql = """CREATE TABLE IF NOT EXISTS request (
             requestid INTEGER UNSIGNED AUTO_INCREMENT,
             urlid INTEGER UNSIGNED NOT NULL,
@@ -222,10 +239,9 @@ class Storage ():
                     ON UPDATE NO ACTION,
             CONSTRAINT unique_request UNIQUE (urlid, headerid, date)
         );"""
-        self._cur.execute(sql)
-        self._con.commit()
+        cur.execute(sql)
         
-    def _create_response_table (self):
+    def _create_response_table (self, cur):
         sql = """CREATE TABLE IF NOT EXISTS response (
             responseid INTEGER UNSIGNED AUTO_INCREMENT,
             requestid INTEGER UNSIGNED NOT NULL,
@@ -240,10 +256,9 @@ class Storage ():
                     ON DELETE CASCADE
                     ON UPDATE NO ACTION
         );"""
-        self._cur.execute(sql)
-        self._con.commit()
+        cur.execute(sql)
         
-    def _create_domain_timeout_table (self):
+    def _create_domain_timeout_table (self, cur):
         sql = """CREATE TABLE IF NOT EXISTS domain_timeout ( 
             domainid INTEGER UNSIGNED NOT NULL,
             timeout_set DATETIME NOT NULL,
@@ -256,47 +271,55 @@ class Storage ():
                     ON UPDATE CASCADE,
             CONSTRAINT unique_domain_timeout UNIQUE (domainid, timeout_set)
         );"""
-        self._cur.execute(sql)
-        self._con.commit()
+        cur.execute(sql)
         
-    def _create_full_request_view (self):
+    def _create_full_request_view (self, cur):
         sql = """CREATE VIEW IF NOT EXISTS full_request AS 
         {:s};""".format(Storage.FULLREQUEST_QUERY)
-        self._cur.execute(sql)
-        self._con.commit()
+        cur.execute(sql)
         
-    def _create_domain_status_view (self):
+    def _create_domain_status_view (self, cur):
         sql = """CREATE VIEW IF NOT EXISTS domain_status AS
         {:s};""".format(Storage.DOMAINSTATUS_QUERY)
-        self._cur.execute(sql)
-        self._con.commit()
+        cur.execute(sql)
         
     def _initialize (self):
-        self._create_database(self.db_name)
+        self._create_database()
         
-        self._create_domain_table()
-        self._create_url_table()
+        with self._con as cur:
+            self._create_domain_table(cur)
+            self._create_url_table(cur)
+            
+            self._create_request_header_table(cur)
+            self._create_request_table(cur)
+            self._create_response_table(cur)
+            self._create_domain_timeout_table(cur)
+            
+            self._create_full_request_view(cur)
+            self._create_domain_status_view(cur)
         
-        self._create_request_header_table()
-        self._create_request_table()
-        self._create_response_table()
-        self._create_domain_timeout_table()
-        
-        self._create_full_request_view()
-        self._create_domain_status_view()
-        
-    def get_last_insert_id (self):
-        sql = "SELECT LAST_INSERT_ID();"
-        self._cur.execute(sql)
-        
-        row = self._cur.fetchall()[0][0]
+    def get_last_insert_id (self, cur=None):
+        if cur is None:
+            with self._con as cur:
+                sql = "SELECT LAST_INSERT_ID();"
+                cur.execute(sql)
+                
+                row = cur.fetchall()[0][0]
+        else:
+            sql = "SELECT LAST_INSERT_ID();"
+            cur.execute(sql)
+            
+            row = cur.fetchall()[0][0]
+            
         return row
+            
         
     def direct_insert_domain (self, url):
         sql = "INSERT INTO domain (scheme, netloc) VALUES {:s};"
         
         fmt = "(\"{:s}\",\"{:s}\")" 
         
+                
         if isinstance(url, URL):
             url = fmt.format(
                         url.urlparsed.scheme,
@@ -305,10 +328,9 @@ class Storage ():
             
             sql = sql.format(url)
             
-            self._cur.execute(sql)
-            self._con.commit()
-            
-            last_id = self.get_last_insert_id()
+            with self._con as cur:
+                cur.execute(sql)
+                last_id = self.get_last_insert_id(cur)
         else:
             last_id = []
             
@@ -328,9 +350,10 @@ class Storage ():
                     url.urlparsed.scheme,
                     url.urlparsed.netloc
                 )
-            self._cur.execute(sql)
             
-            rows = self._cur.fetchall()
+            with self._con as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
             
             if len(rows) == 0:
                 return None
@@ -394,10 +417,10 @@ class Storage ():
             
             sql = sql.format(url)
             
-            self._cur.execute(sql)
-            self._con.commit()
-            
-            last_id = self.get_last_insert_id()
+            with self._con as cur:
+                cur.execute(sql)
+                
+                last_id = self.get_last_insert_id(cur)
         else:
             last_id = []
             
@@ -424,9 +447,11 @@ class Storage ():
                         url.path_checksum.hex(),
                         url.query_checksum.hex()
                     )
-                self._cur.execute(sql)
                 
-                rows = self._cur.fetchall()
+                with self._con as cur:
+                    cur.execute(sql)
+                    
+                    rows = cur.fetchall()
                 
                 if len(rows) == 0:
                     return None
@@ -495,10 +520,9 @@ class Storage ():
                 request_header.stringed_header_dict.replace("\"", "\\\""))
             sql = sql.format(fmt)
             
-            self._cur.execute(sql)
-            self._con.commit()
-            
-            last_id = self.get_last_insert_id()
+            with self._con as cur:
+                cur.execute(sql)
+                last_id = self.get_last_insert_id(cur)
         else:
             last_id = []
             
@@ -516,9 +540,9 @@ class Storage ():
             WHERE headerchecksum = X'{:s}';          
             """.format(request_header.header_checksum.hex())
             
-            self._cur.execute(sql)
-                
-            rows = self._cur.fetchall()
+            with self._con as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
             
             if len(rows) == 0:
                 return None
@@ -576,10 +600,9 @@ class Storage ():
                              timestamp.strftime(Storage.DATETIME_FORMAT))
             sql = sql.format(fmt)
             
-            self._cur.execute(sql)
-            self._con.commit()
-            
-            last_id = self.get_last_insert_id()
+            with self._con as cur:
+                cur.execute(sql)                
+                last_id = self.get_last_insert_id(cur)
         else:
             last_id = []
             
@@ -630,9 +653,9 @@ class Storage ():
                                                       max_timestamp)
                 )
             
-            self._cur.execute(sql)
-                
-            rows = self._cur.fetchall()
+            with self._con as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
             
             if len(rows) == 0:
                 return None
@@ -696,11 +719,10 @@ class Storage ():
                     content
                 )
             sql = sql.format(fmt)
-                
-            self._cur.execute(sql)
-            self._con.commit()
             
-            last_id = self.get_last_insert_id()
+            with self._con as cur:
+                cur.execute(sql)
+                last_id = self.get_last_insert_id(cur)
         else:
             last_id = []
             
@@ -843,9 +865,10 @@ class Storage ():
         WHERE requestid = {:d}{:s}
         ORDER BY requested DESC LIMIT 1;
         """.format(request_id, sc_sql)
-        self._cur.execute(sql)
-        rows = self._cur.fetchall()
         
+        with self._con as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
         
         if len(rows) == 1:
             df = pd.Series(rows[0], index=["ResponseId", "RequestId", "Timestamp", "StatusCode", "Header", "Content"])
@@ -876,8 +899,9 @@ class Storage ():
         HAVING COUNT(resp.responseid) = 0;
         """.format(Storage.FULLREQUEST_QUERY)
         
-        self._cur.execute(sql)
-        rows = self._cur.fetchall()
+        with self._con as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
         
         df = Storage._prepare_fullrequest_dataframe(rows)
         
@@ -903,8 +927,9 @@ class Storage ():
                 Storage.query_requests_without_coded_responses(status_code)
             )
         
-        self._cur.execute(sql)
-        rows = self._cur.fetchall()
+        with self._con as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
         
         df = Storage._prepare_fullrequest_dataframe(rows)
         
@@ -913,8 +938,9 @@ class Storage ():
     def get_domain_status (self):
         sql = "{:s};".format(Storage.DOMAINSTATUS_QUERY)
         
-        self._cur.execute(sql)
-        rows = self._cur.fetchall()
+        with self._con as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
         
         df = pd.DataFrame(rows, columns=Storage.DOMAINSTATUS_COLUMNS)
         df = df.set_index(Storage.DOMAINSTATUS_INDEX)
@@ -958,15 +984,16 @@ class Storage ():
                 return
             
         print(sql)
-            
-        self._cur.execute(sql)
-        self._con.commit()
+        
+        with self._con as cur:
+            cur.execute(sql)
         
     def get_latest_domain_timeout (self):
         sql = """{:s};""".format(Storage.LATESTTIMEOUT_QUERY)
         
-        self._cur.execute(sql)
-        rows = self._cur.fetchall()
+        with self._con as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
         
         df = pd.DataFrame(rows, columns=Storage.DOMAINTIMEOUT_COLUMNS)
         df = df.set_index(Storage.DOMAINTIMEOUT_INDEX)
@@ -983,8 +1010,10 @@ class Storage ():
         GROUP BY d.domainid) x
         WHERE x.count = 0;"""
         
-        self._cur.execute(sql)
-        rows = self._cur.fetchall()
+        with self._con as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
+            
         rows = np.array([
                 x[0]
                 for x in rows
@@ -1011,8 +1040,9 @@ class Storage ():
                 Storage.LATESTTIMEOUT_QUERY
             )
         
-        self._cur.execute(sql)
-        rows = self._cur.fetchall()
+        with self._con as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
         
         df = Storage._prepare_fullrequest_dataframe(rows, [Storage.RETRY_COLUMN])
         
@@ -1038,8 +1068,9 @@ class Storage ():
                 Storage.LATESTTIMEOUT_QUERY
             )
         
-        self._cur.execute(sql)
-        rows = self._cur.fetchall()
+        with self._con as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
         
         df = Storage._prepare_fullrequest_dataframe(rows)
         

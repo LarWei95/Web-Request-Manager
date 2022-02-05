@@ -12,6 +12,7 @@ from io import BytesIO
 import requests
 import datetime as dt
 import pandas as pd
+import time
 
 URL_KEY = "url"
 HEADER_KEY = "header"
@@ -72,9 +73,14 @@ class WebRequestAPIServer ():
                 request_id = int(request.args.get(REQUESTID_KEY))
                 
                 response = self._handler.get_response(request_id=request_id)
-                response = response.to_dict()
-                response["Content"] = response["Content"].hex()
-                return jsonify(response)
+                print("Received request for {:d}:\n{:s}".format(request_id, str(response)))
+                
+                if response is not None:
+                    response = response.to_dict()
+                    response["Content"] = response["Content"].hex()
+                    return jsonify(response)
+                else:
+                    return jsonify({})
         
     def run (self, host=None, port=None):
         self._app.run(host=host, port=port)
@@ -112,20 +118,34 @@ class WebRequestAPIClient ():
         request_id = json.loads(r.content.decode("utf-8"))[REQUESTID_KEY]
         return request_id
     
-    def get_response (self, request_id):
+    def get_response (self, url=None, header={}, min_date=None, max_date=None, request_id=None,
+                      wait=True):
+        if url is None and request_id is None:
+            errmsg = "Both URL and request id are None."
+            raise ValueError(errmsg)
+        
+        if request_id is None:
+            request_id = self.post_page_request(url, header, min_date, max_date)
+            print("RequestID: "+str(request_id))
+        
         params = {REQUESTID_KEY : request_id}
         
-        r = requests.get(self._url, params=params)
-        response = json.loads(r.content.decode("utf-8"))
-        response["Header"] = json.loads(response["Header"])
-        response["Content"] = BytesIO(bytes.fromhex(response["Content"]))
-        
-        pprint(response)
-        
-        with gzip.open(response["Content"], "rb") as f:
-            response["Content"] = f.read()
+        while True:
+            r = requests.get(self._url, params=params)
+            response = json.loads(r.content.decode("utf-8"))
             
-        response = pd.Series(response)
+            if "Header" in response and "Content" in response:
+                response["Header"] = json.loads(response["Header"])
+                response["Content"] = BytesIO(bytes.fromhex(response["Content"]))
+                
+                with gzip.open(response["Content"], "rb") as f:
+                    response["Content"] = f.read()
+                    
+                response = pd.Series(response)
+                    
+                return response
+            else:
+                if not wait:
+                    return None
             
-        return response
-        
+            time.sleep(1)

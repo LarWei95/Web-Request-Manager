@@ -90,18 +90,18 @@ def req ():
     print(response.headers)
 
 def client ():
-    url = "https://docs.python-requests.org/en/latest/user/quickstart/"
+    url = "https://www.raspberrypi.com/products/raspberry-pi-4-model-b/"
     header = {"User-Agent" : "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:96.0) Gecko/20100101 Firefox/96.0"}
-    min_date = dt.datetime(2022, 1, 1)
-    max_date = dt.datetime(2022, 3, 1)
+    min_date = dt.datetime.now()
+    max_date = dt.datetime(2022, 2, 3, 12, 4)
     
     
     client = WebRequestAPIClient("http://127.0.0.1", 5000)
-    request_id = client.post_page_request(url, header, min_date, max_date)
-    print(request_id)
+    # request_id = client.post_page_request(url, header, min_date, max_date)
+    # print(request_id)
     # EXECUTE NECESSARY!
     
-    response = client.get_response(request_id)
+    response = client.get_response(url, header, min_date, max_date)
     pprint(response)
 
 def quick_execute ():
@@ -116,6 +116,6 @@ def quick_execute ():
     request_handler.execute_requests()
 
 if __name__ == '__main__':
-    client()
+    quick_execute()
     
     
