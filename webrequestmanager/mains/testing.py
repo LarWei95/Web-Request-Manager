@@ -92,8 +92,8 @@ def req ():
 def client ():
     url = "https://www.raspberrypi.com/products/raspberry-pi-4-model-b/"
     header = {"User-Agent" : "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:96.0) Gecko/20100101 Firefox/96.0"}
-    min_date = dt.datetime.now()
-    max_date = dt.datetime(2022, 2, 3, 12, 4)
+    min_date = dt.datetime.now() - dt.timedelta(hours=1)
+    max_date = dt.datetime(2022, 2, 7, 12, 4)
     
     
     client = WebRequestAPIClient("http://127.0.0.1", 5000)
@@ -104,18 +104,7 @@ def client ():
     response = client.get_response(url, header, min_date, max_date)
     pprint(response)
 
-def quick_execute ():
-    with open("../../credentials.json", "r") as f:
-        credentials = json.load(f)
-    
-    user = credentials["user"]
-    password = credentials["password"]
-    
-    storage = Storage("localhost", user, password)
-    request_handler = RequestHandler(storage)
-    request_handler.execute_requests()
-
 if __name__ == '__main__':
-    quick_execute()
+    client()
     
     

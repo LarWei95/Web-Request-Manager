@@ -21,12 +21,30 @@ MAX_DATE_KEY = "max_date"
 DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 REQUESTID_KEY = "request_id"
+STATUSCODE_KEY = "status_code"
+
+def stringify_status_codes (status_code):
+    if isinstance(status_code, int):
+        status_code = str(status_code)
+    else: 
+        status_code = ",".join(str(x) for x in status_code)
+        
+    return status_code
+    
+def destringify_status_codes (status_code):
+    if "," in status_code:
+        status_code = [
+                int(x.strip())
+                for x in status_code.split(",")
+            ]
+    else:
+        status_code = int(status_code.strip())
+        
+    return status_code
 
 class WebRequestAPIServer ():
     # ? = %3F
     # / = %2F
-    
-    
     
     def __init__ (self, storage):
         self._storage = storage
@@ -45,27 +63,38 @@ class WebRequestAPIServer ():
         return v
         
     @classmethod
-    def prepare_post_request (cls, post_request):
+    def decode_post_request (cls, post_request):
         header = bytes.fromhex(post_request[HEADER_KEY]).decode("utf-8")
         post_request[HEADER_KEY] = json.loads(header)
             
         url = bytes.fromhex(post_request[URL_KEY]).decode("utf-8")
         post_request[URL_KEY] = url
         
+        status_codes = post_request.get(STATUSCODE_KEY, "200")
+        status_codes = destringify_status_codes(status_codes)
+        post_request[STATUSCODE_KEY] = status_codes
+        
         post_request[MIN_DATE_KEY] = cls._conditional_to_datetime(post_request, MIN_DATE_KEY)
         post_request[MAX_DATE_KEY] = cls._conditional_to_datetime(post_request, MAX_DATE_KEY)
         
         return post_request
+        
+    def _process_status_code (self, status_code):
+        if "," not in status_code:
+            return int(status_code)
+        else:
+            status_code = status_code.split(",")
         
     def _register_callbacks (self, app):
         @app.route("/", methods=["POST", "GET"])
         def get_site ():
             if request.method == "POST":
                 post_request = dict(request.form)
-                post_request = WebRequestAPIServer.prepare_post_request(post_request)
+                post_request = WebRequestAPIServer.decode_post_request(post_request)
                 
                 request_id = self._handler.add_request(post_request[URL_KEY], 
-                                          post_request[HEADER_KEY], 
+                                          post_request[HEADER_KEY],
+                                          post_request[STATUSCODE_KEY],
                                           post_request[MIN_DATE_KEY], 
                                           post_request[MAX_DATE_KEY])
                 return jsonify({REQUESTID_KEY : request_id})
@@ -73,7 +102,6 @@ class WebRequestAPIServer ():
                 request_id = int(request.args.get(REQUESTID_KEY))
                 
                 response = self._handler.get_response(request_id=request_id)
-                print("Received request for {:d}:\n{:s}".format(request_id, str(response)))
                 
                 if response is not None:
                     response = response.to_dict()
@@ -92,13 +120,14 @@ class WebRequestAPIClient ():
         self._url = "{:s}:{:d}".format(self._host, self._port)
         
     @classmethod
-    def prepare_page_request_params (cls, url, header, min_date, max_date):
+    def prepare_page_request_params (cls, url, header, accepted_status, min_date, max_date):
         header = json.dumps(header).encode("utf-8").hex()
         url = url.encode("utf-8").hex()
         
         params = {
                 URL_KEY : url,
-                HEADER_KEY : header
+                HEADER_KEY : header,
+                STATUSCODE_KEY : stringify_status_codes(accepted_status)
             }
         
         if min_date is not None:
@@ -111,24 +140,32 @@ class WebRequestAPIClient ():
         
         return params
         
-    def post_page_request (self, url, header, min_date=None, max_date=None):
-        params = WebRequestAPIClient.prepare_page_request_params(url, header, min_date, max_date)
+    def post_page_request (self, url, header, accepted_status=200, min_date=None, max_date=None):
+        params = WebRequestAPIClient.prepare_page_request_params(url, header, accepted_status, min_date, max_date)
         
         r = requests.post(self._url, data=params)
         request_id = json.loads(r.content.decode("utf-8"))[REQUESTID_KEY]
         return request_id
     
-    def get_response (self, url=None, header={}, min_date=None, max_date=None, request_id=None,
-                      wait=True):
+    def _process_status_code (self, status_code):
+        if isinstance(status_code, int):
+            return str(status_code)
+        else:
+            status_code = [str(x) for x in status_code]
+            status_code = ",".join(status_code)
+            return status_code
+    
+    def get_response (self, url=None, header={}, min_date=None, max_date=None, request_id=None, wait=True):
         if url is None and request_id is None:
             errmsg = "Both URL and request id are None."
             raise ValueError(errmsg)
         
         if request_id is None:
             request_id = self.post_page_request(url, header, min_date, max_date)
-            print("RequestID: "+str(request_id))
         
-        params = {REQUESTID_KEY : request_id}
+        params = {
+            REQUESTID_KEY : request_id
+            }
         
         while True:
             r = requests.get(self._url, params=params)

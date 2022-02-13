@@ -43,20 +43,22 @@ class RequestHeader ():
         return RequestHeader(d, stringed, checksum)
         
 class Request ():
-    def __init__ (self, url, request_header, timestamp):
+    def __init__ (self, url, request_header, timestamp, accepted_status):
         self.url = url
         self.request_header = request_header
         self.timestamp = timestamp
+        self.accepted_status = accepted_status
         
 class Response ():
-    def __init__ (self, request, status_code, headers, content):
+    def __init__ (self, request, status_code, timestamp, headers, content):
         self.request = request
         self.status_code = status_code
+        self.timestamp = timestamp
         self.headers = headers
         self.content = content
         
     @classmethod
-    def of_response (cls, request, requests_response):
+    def of_response (cls, request, requests_response, timestamp):
         status_code = requests_response.status_code
         headers = json.dumps(dict(requests_response.headers))
         headers = headers.replace("\"", "\\\"")
@@ -74,7 +76,7 @@ class Response ():
         else:
             content = None
             
-        return Response(request, status_code, headers, content)
+        return Response(request, status_code, timestamp, headers, content)
     
 class _DBCon ():
     def __init__ (self, host, user, passwd, db_name):
@@ -127,37 +129,96 @@ class Storage ():
     FULLREQUEST_INDEX = ["RequestId", "UrlId", "DomainId", "HeaderId"]
     
     DOMAINSTATUS_QUERY = """SELECT 
-            d.domainid, reqh.headerid, 
-            d.scheme, d.netloc, reqh.header,
-            MAX(resp.requested) "requested",
-            req.requestid,
-            resp.statuscode
-        FROM response AS resp
-        INNER JOIN request AS req
-            ON resp.requestid = req.requestid
-        INNER JOIN request_header AS reqh
-            ON req.headerid = reqh.headerid
-        INNER JOIN url
-            ON req.urlid = url.urlid
-        INNER JOIN domain AS d
-            ON url.domainid = d.domainid
-        GROUP BY d.domainid, reqh.headerid
-    """
+        d_s.domainid, d_s.headerid,
+        d.scheme, d.netloc, reqh.header,
+        d_s.requested, d_s.status
+    FROM domain_status AS d_s
+    INNER JOIN domain AS d
+        ON d_s.domainid = d.domainid
+    INNER JOIN request_header AS reqh
+        ON d_s.headerid = reqh.headerid"""
     DOMAINSTATUS_COLUMNS = ["DomainId", "HeaderId", "Scheme", "Netloc", 
-                            "Header", "Timestamp", "RequestId", "Statuscode"]
+                            "Header", "Timestamp", "Status"]
     DOMAINSTATUS_INDEX = ["DomainId", "HeaderId"]
     
-    LATESTTIMEOUT_QUERY = """SELECT dt.domainid, dt.timeout_set, dt.timeout
-        FROM domain_timeout AS dt
-        INNER JOIN 
-            (SELECT dtt.domainid, MAX(dtt.timeout_set) "timeout_set"
-            FROM domain_timeout AS dtt
-            GROUP BY dtt.domainid) temp
-        ON dt.domainid = temp.domainid AND dt.timeout_set = temp.timeout_set"""
-    DOMAINTIMEOUT_COLUMNS = ["DomainId", "TimeoutSet", "Timeout"]
-    DOMAINTIMEOUT_INDEX = ["DomainId", "TimeoutSet"]
+    DOMAINTIMEOUT_COLUMNS = ["DomainId", "Timeout"]
+    DOMAINTIMEOUT_INDEX = "DomainId"
     
     RETRY_COLUMN = "Retry"
+    
+    RESPONSE_COLUMNS = ["ResponseId", "RequestId", "Timestamp", "StatusCode", "Header", "Content"]
+    
+    FULLREQUEST_PENDING_QUERY = """SELECT req.requestid, req.urlid, 
+                    url.domainid, req.headerid,
+                    d.scheme, d.netloc, 
+                    url.path, url.query, 
+                    reqh.header, req.date,
+                    CONCAT(d.scheme, 
+                        "://", d.netloc, 
+                        url.path, 
+                        IF(url.query != "", 
+                            CONCAT("?", url.query), 
+                            url.query)
+                    ) "url",
+                    x.completing_responseid,
+                    y.response_count
+    FROM request AS req
+    INNER JOIN url 
+                ON req.urlid = url.urlid 
+            INNER JOIN domain AS d 
+                ON url.domainid = d.domainid 
+            INNER JOIN request_header AS reqh 
+                ON req.headerid = reqh.headerid
+    LEFT JOIN (SELECT req.requestid, resp.responseid "completing_responseid"
+        FROM request AS req
+        INNER JOIN response AS resp
+            ON req.requestid = resp.requestid
+        INNER JOIN accepted_status AS a_s
+            ON req.requestid = a_s.requestid AND resp.statuscode = a_s.statuscode) x
+    ON req.requestid = x.requestid
+    LEFT JOIN (SELECT req.requestid, COUNT(resp.responseid) "response_count"
+                FROM request AS req
+                LEFT JOIN response AS resp
+                ON req.requestid = resp.requestid
+              GROUP BY req.requestid) y
+    ON req.requestid = y.requestid
+    WHERE x.completing_responseid IS NULL"""
+    FULLREQUEST_PENDING_COLUMNS = ["RequestId", "UrlId", "DomainId", "HeaderId", "Scheme", "Netloc",
+                           "Path", "Query", "Header", "Timestamp", "URL", "CompletingResponseId",
+                           "ResponseCount"]
+    FULLREQUEST_PENDING_INDEX = ["RequestId", "UrlId", "DomainId", "HeaderId"]
+    
+    LAST_REQUEST_RESPONSE_QUERY = """SELECT req.requestid, resp.responseid, x.requested, resp.statuscode
+        FROM request AS req
+        INNER JOIN (SELECT resp.requestid, MAX(resp.requested) "requested"
+                   FROM response AS resp
+                   GROUP BY resp.requestid) x
+        ON req.requestid = x.requestid
+        INNER JOIN response AS resp
+            ON x.requestid = resp.requestid AND x.requested = resp.requested"""
+    
+    COMPLETING_RESPONSES_QUERY = """SELECT resp.responseid, req.requestid, resp.requested,
+        resp.statuscode IN (SELECT a_s.statuscode FROM accepted_status AS a_s WHERE a_s.requestid = req.requestid) "accepted"
+    FROM request AS req
+    INNER JOIN response AS resp
+        ON req.requestid = resp.requestid"""
+        
+    LAST_COMPLETING_RESPONSES_QUERY = """SELECT x.requestid, x.requested, y.responseid, y.accepted
+    FROM (SELECT req.requestid, MAX(resp.requested) "requested"
+          FROM request AS req
+          INNER JOIN response AS resp
+              ON req.requestid = resp.requestid
+          GROUP BY req.requestid) x
+          
+    INNER JOIN (SELECT resp.responseid, req.requestid, resp.requested,
+        resp.statuscode IN (SELECT a_s.statuscode FROM accepted_status AS a_s WHERE a_s.requestid = req.requestid) "accepted"
+        FROM request AS req
+        INNER JOIN response AS resp
+            ON req.requestid = resp.requestid) y
+    ON x.requestid = y.requestid AND x.requested = y.requested
+    """
+    
+    
     
     URLPARSE_REVERT = "{:s}://{:s}{:s}{:s}"
     
@@ -254,33 +315,180 @@ class Storage ():
             FOREIGN KEY (requestid)
                 REFERENCES request(requestid)
                     ON DELETE CASCADE
-                    ON UPDATE NO ACTION
+                    ON UPDATE NO ACTION,
+            INDEX(statuscode),
+            INDEX(requestid, requested)
         );"""
         cur.execute(sql)
+    
+    def _create_accepted_status_codes_table (self, cur):
+        sql = """CREATE TABLE IF NOT EXISTS accepted_status (
+            requestid INTEGER UNSIGNED NOT NULL,
+            statuscode SMALLINT UNSIGNED NOT NULL,
         
+            PRIMARY KEY (requestid, statuscode),
+            FOREIGN KEY (requestid)
+                REFERENCES request(requestid)
+                    ON DELETE CASCADE
+                    ON UPDATE NO ACTION,
+            CONSTRAINT unique_accepted_status_codes UNIQUE (requestid, statuscode)
+        );"""
+        cur.execute(sql)
+    
     def _create_domain_timeout_table (self, cur):
         sql = """CREATE TABLE IF NOT EXISTS domain_timeout ( 
             domainid INTEGER UNSIGNED NOT NULL,
-            timeout_set DATETIME NOT NULL,
             timeout TIME NOT NULL,
             
-            PRIMARY KEY (domainid, timeout_set),
+            PRIMARY KEY (domainid),
+            FOREIGN KEY (domainid)
+                REFERENCES domain(domainid)
+                    ON DELETE CASCADE
+                    ON UPDATE CASCADE
+        );"""
+        cur.execute(sql)
+        
+    def _create_request_status_table (self, cur):
+        sql = """CREATE TABLE IF NOT EXISTS request_status ( 
+            requestid INTEGER UNSIGNED NOT NULL,
+            requested DATETIME NULL,
+            status TINYINT UNSIGNED NOT NULL,
+            
+            PRIMARY KEY (requestid),
+            FOREIGN KEY (requestid)
+                REFERENCES request(requestid)
+                    ON DELETE CASCADE
+                    ON UPDATE CASCADE,
+            INDEX(status)
+        );"""
+        cur.execute(sql)
+        
+    def _create_domain_status_table (self, cur):
+        sql = """CREATE TABLE IF NOT EXISTS domain_status (
+            domainid INTEGER UNSIGNED,
+            headerid INTEGER UNSIGNED,
+            requested DATETIME NULL,
+            status TINYINT UNSIGNED NOT NULL,
+            
+            PRIMARY KEY (domainid, headerid),
             FOREIGN KEY (domainid)
                 REFERENCES domain(domainid)
                     ON DELETE CASCADE
                     ON UPDATE CASCADE,
-            CONSTRAINT unique_domain_timeout UNIQUE (domainid, timeout_set)
+            FOREIGN KEY (headerid)
+                REFERENCES request_header(headerid)
+                    ON DELETE CASCADE
+                    ON UPDATE CASCADE
+        );"""
+        cur.execute(sql)
+        
+    def _create_domain_retry_table (self, cur):
+        sql = """CREATE TABLE IF NOT EXISTS domain_retry (
+            domainid INTEGER UNSIGNED,
+            headerid INTEGER UNSIGNED,
+            retry DATETIME NULL,
+            
+            PRIMARY KEY (domainid, headerid),
+            FOREIGN KEY (domainid)
+                REFERENCES domain(domainid)
+                    ON DELETE CASCADE
+                    ON UPDATE CASCADE,
+            FOREIGN KEY (headerid)
+                REFERENCES request_header(headerid)
+                    ON DELETE CASCADE
+                    ON UPDATE CASCADE,
+            INDEX(retry)
         );"""
         cur.execute(sql)
         
     def _create_full_request_view (self, cur):
         sql = """CREATE VIEW IF NOT EXISTS full_request AS 
         {:s};""".format(Storage.FULLREQUEST_QUERY)
+        cur.execute(sql) 
+           
+    def _create_request_insert_trigger (self, cur):
+        sql = """
+        CREATE TRIGGER IF NOT EXISTS insert_request_trigger
+        AFTER INSERT
+        ON request
+        FOR EACH ROW
+        INSERT INTO request_status (requestid, requested, status) 
+        VALUES (NEW.requestid, NULL, 0);
+        """
         cur.execute(sql)
         
-    def _create_domain_status_view (self, cur):
-        sql = """CREATE VIEW IF NOT EXISTS domain_status AS
-        {:s};""".format(Storage.DOMAINSTATUS_QUERY)
+    def _create_response_insert_trigger (self, cur):
+        sql = """
+        CREATE TRIGGER IF NOT EXISTS insert_response_trigger
+        AFTER INSERT
+        ON response
+        FOR EACH ROW
+        UPDATE IGNORE request_status
+        SET status = 1 + (SELECT NEW.statuscode IN 
+            (SELECT a_s.statuscode FROM accepted_status AS a_s WHERE a_s.requestid = NEW.requestid)),
+            requested = NEW.requested
+        WHERE requestid = NEW.requestid
+        """
+        cur.execute(sql)
+        
+    def _create_request_status_insert_trigger (self, cur):
+        sql = """
+        CREATE TRIGGER IF NOT EXISTS insert_request_status_trigger
+        AFTER INSERT
+        ON request_status
+        FOR EACH ROW
+        INSERT IGNORE INTO domain_status (domainid, headerid, requested, status) 
+        SELECT d.domainid, req.headerid, NULL, 0
+        FROM request AS req
+        INNER JOIN url
+            ON req.urlid = url.urlid
+        INNER JOIN domain AS d
+            ON url.domainid = d.domainid
+        WHERE req.requestid = NEW.requestid
+        """
+        cur.execute(sql)
+        
+    def _create_request_status_update_trigger (self, cur):
+        sql = """
+        CREATE TRIGGER IF NOT EXISTS update_request_status_trigger
+        AFTER UPDATE
+        ON request_status
+        FOR EACH ROW
+        UPDATE IGNORE domain_status
+        SET requested = NEW.requested,
+            status = NEW.status
+        WHERE (domainid, headerid) IN (
+                SELECT d.domainid, req.headerid
+                FROM request AS req
+                INNER JOIN url
+                    ON req.urlid = url.urlid
+                INNER JOIN domain AS d
+                    ON url.domainid = d.domainid
+                WHERE req.requestid = NEW.requestid
+            )
+        """
+        cur.execute(sql)
+        
+    def _create_domain_status_update_trigger (self, cur):
+        # domainid, headerid, requested, status
+        # TIMESTAMPADD(SECOND, TIME_TO_SEC(dt.timeout), d_s.requested) "retry"
+        sql = """
+        CREATE TRIGGER IF NOT EXISTS insert_domain_status_trigger
+        AFTER UPDATE
+        ON domain_status
+        FOR EACH ROW
+        INSERT INTO domain_retry (domainid, headerid, retry)
+        SELECT 
+            NEW.domainid, NEW.headerid, 
+            TIMESTAMPADD(SECOND, TIME_TO_SEC(dt.timeout), NEW.requested) "retry"
+        FROM domain_timeout AS dt
+        WHERE dt.domainid = NEW.domainid AND NEW.status = 1
+        ON DUPLICATE KEY UPDATE
+            retry = (SELECT 
+                TIMESTAMPADD(SECOND, TIME_TO_SEC(dt.timeout), NEW.requested) "retry"
+            FROM domain_timeout AS dt
+            WHERE dt.domainid = NEW.domainid AND NEW.status = 1)
+        """
         cur.execute(sql)
         
     def _initialize (self):
@@ -292,11 +500,20 @@ class Storage ():
             
             self._create_request_header_table(cur)
             self._create_request_table(cur)
+            self._create_request_status_table(cur)
             self._create_response_table(cur)
+            self._create_accepted_status_codes_table(cur)
             self._create_domain_timeout_table(cur)
+            self._create_domain_status_table(cur)
+            self._create_domain_retry_table(cur)
             
             self._create_full_request_view(cur)
-            self._create_domain_status_view(cur)
+            
+            self._create_request_insert_trigger(cur)
+            self._create_response_insert_trigger(cur)
+            self._create_request_status_insert_trigger(cur)
+            self._create_request_status_update_trigger(cur)
+            self._create_domain_status_update_trigger(cur)
         
     def get_last_insert_id (self, cur=None):
         if cur is None:
@@ -589,6 +806,38 @@ class Storage ():
             else:
                 return existing_ids
             
+    def direct_insert_accepted_status (self, request_id, status_code):
+        sql = "INSERT IGNORE INTO accepted_status (requestid, statuscode) VALUES {:s};"
+        
+        fmt = "({:d},{:d})"
+        
+        rid_list = isinstance(request_id, (list, np.ndarray))
+        sc_list = isinstance(status_code, (list, np.ndarray))
+        
+        if not rid_list and sc_list:
+            values = ",".join(fmt.format(request_id, x) for x in status_code)
+        elif rid_list and not sc_list:
+            values = ",".join(fmt.format(x, status_code) for x in request_id)
+        else:
+            values = fmt.format(request_id, status_code)
+            
+        sql = sql.format(values)
+        
+        with self._con as cur:
+            cur.execute(sql)
+            
+    def get_accepted_status (self, request_id):
+        sql = "SELECT statuscode FROM accepted_status WHERE requestid = {:d}".format(
+                request_id
+            )
+        
+        with self._con as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
+            
+        rows = [x[0] for x in rows]
+        return rows
+            
     def direct_insert_request (self, url_id, header_id, timestamp):
         sql = "INSERT INTO request (urlid, headerid, date) VALUES {:s};"
         
@@ -642,7 +891,7 @@ class Storage ():
             
     def get_request_id (self, url_id, header_id, exact_timestamp=None,
                         min_timestamp=None, max_timestamp=None):
-        if not isinstance(url_id, (list, np.ndarray)):
+        if not isinstance(url_id, (list, np.ndarray)):            
             sql = """SELECT requestid FROM request
             WHERE 
             urlid = {:d} AND 
@@ -695,9 +944,11 @@ class Storage ():
             else:
                 existing_id = existing_id[0]
                 
+            self.direct_insert_accepted_status(existing_id, request.accepted_status)
+                
             return existing_id
         
-    def direct_insert_response (self, request_id, timestamp, response):
+    def direct_insert_response (self, request_id, response):
         if isinstance(response, Response):
             content = response.content
             
@@ -713,7 +964,7 @@ class Storage ():
             
             fmt = fmt.format(
                     request_id,
-                    timestamp.strftime(Storage.DATETIME_FORMAT),
+                    response.timestamp.strftime(Storage.DATETIME_FORMAT),
                     response.status_code,
                     response.headers,
                     content
@@ -726,8 +977,8 @@ class Storage ():
         else:
             last_id = []
             
-            for ri, tt, r in zip(request_id, timestamp, response):
-                last_id.append(self.direct_insert_response(ri, tt, r))
+            for ri, r in zip(request_id, response):
+                last_id.append(self.direct_insert_response(ri, r))
                 
             last_id = np.array(last_id)
             
@@ -854,24 +1105,27 @@ class Storage ():
             
         return conditions    
     
-    def get_latest_response (self, request_id, status_code=None):
-        if status_code is None:
-            sc_sql = ""
-        else:
-            sc_sql = " AND statuscode = {:d}".format(status_code)
-        
-        sql = """SELECT responseid, requestid, requested, statuscode, header, content
-        FROM response
-        WHERE requestid = {:d}{:s}
-        ORDER BY requested DESC LIMIT 1;
-        """.format(request_id, sc_sql)
-        
+    def get_latest_accepted_response (self, request_id):
+        sql = """SELECT 
+            resp.responseid, resp.requestid, resp.requested, 
+            resp.statuscode, resp.header, resp.content
+        FROM response AS resp
+        WHERE resp.requestid = {:d} AND 
+        resp.statuscode IN (
+            SELECT statuscode 
+            FROM accepted_status 
+            WHERE resp.requestid = {:d}
+        )
+        ORDER BY resp.requested DESC LIMIT 1;""".format(
+            request_id, request_id
+            )
+        ["ResponseId", "RequestId", "Timestamp", "StatusCode", "Header", "Content"]
         with self._con as cur:
             cur.execute(sql)
             rows = cur.fetchall()
         
         if len(rows) == 1:
-            df = pd.Series(rows[0], index=["ResponseId", "RequestId", "Timestamp", "StatusCode", "Header", "Content"])
+            df = pd.Series(rows[0], index=Storage.RESPONSE_COLUMNS)
         else:
             df = None
         
@@ -892,40 +1146,11 @@ class Storage ():
             fr.scheme, fr.netloc, fr.path, fr.query,
             fr.header,
             fr.date, fr.url
-        FROM ({:s}) fr
-        LEFT JOIN response AS resp
-            ON fr.requestid = resp.requestid
-        GROUP BY fr.requestid
-        HAVING COUNT(resp.responseid) = 0;
+        FROM request_status AS rs
+        INNER JOIN ({:s}) fr
+            ON rs.requestid = fr.requestid
+        WHERE rs.status = 0;
         """.format(Storage.FULLREQUEST_QUERY)
-        
-        with self._con as cur:
-            cur.execute(sql)
-            rows = cur.fetchall()
-        
-        df = Storage._prepare_fullrequest_dataframe(rows)
-        
-        return df
-    
-    @classmethod
-    def query_requests_without_coded_responses (cls, status_code=200):
-        sql = """SELECT
-            fr.requestid, fr.urlid, fr.domainid, fr.headerid,
-            fr.scheme, fr.netloc, fr.path, fr.query,
-            fr.header,
-            fr.date, fr.url
-        FROM ({:s}) fr
-        LEFT JOIN response AS resp
-            ON (fr.requestid = resp.requestid AND resp.statuscode = {:d})
-        GROUP BY fr.requestid
-        HAVING COUNT(resp.responseid) = 0
-        """.format(cls.FULLREQUEST_QUERY, status_code)
-        return sql
-    
-    def get_requests_without_coded_responses (self, status_code=200):
-        sql = "{:s};".format(
-                Storage.query_requests_without_coded_responses(status_code)
-            )
         
         with self._con as cur:
             cur.execute(sql)
@@ -965,9 +1190,9 @@ class Storage ():
         return td
     
     def direct_insert_domain_timeout (self, domain_id, timeout):
-        fmt = "({:d}, NOW(), \"{:s}\")"
-        sql = """INSERT INTO domain_timeout (domainid, timeout_set, timeout)
-            VALUES {:s};"""
+        fmt = "({:d}, \"{:s}\")"
+        sql = """INSERT INTO domain_timeout (domainid, timeout)
+            VALUES {:s} ON DUPLICATE KEY UPDATE timeout = VALUES(timeout);"""
         
         if isinstance(timeout, dt.timedelta):
             timeout = Storage.timedelta_to_string(timeout)
@@ -982,14 +1207,12 @@ class Storage ():
                 sql = sql.format(fmt)
             else:
                 return
-            
-        print(sql)
         
         with self._con as cur:
             cur.execute(sql)
         
-    def get_latest_domain_timeout (self):
-        sql = """{:s};""".format(Storage.LATESTTIMEOUT_QUERY)
+    def get_domain_timeout (self):
+        sql = "SELECT domainid, timeout FROM domain_timeout;"
         
         with self._con as cur:
             cur.execute(sql)
@@ -1020,24 +1243,25 @@ class Storage ():
             ])
         return rows
     
-    def get_failing_request_timeouts (self, status_code=200):
+    def get_failing_request_timeouts (self):
         sql = """SELECT 
-            fresp.requestid, fresp.urlid, 
-            fresp.domainid, fresp.headerid,
-            fresp.scheme, fresp.netloc, 
-            fresp.path, fresp.query, 
-            fresp.header, fresp.date,
-            fresp.url,
-            ADDTIME(domstatus.requested, TIME_TO_SEC(ltimeouts.timeout)) "retry"
-        FROM ({:s}) fresp
-        INNER JOIN ({:s}) domstatus
-        ON fresp.domainid = domstatus.domainid AND fresp.headerid = domstatus.headerid
-        INNER JOIN ({:s}) ltimeouts
-        ON fresp.domainid = ltimeouts.domainid
+            fr.requestid, fr.urlid, 
+            fr.domainid, fr.headerid,
+            fr.scheme, fr.netloc, 
+            fr.path, fr.query, 
+            fr.header, fr.date,
+            fr.url,
+            TIMESTAMPADD(SECOND, TIME_TO_SEC(dt.timeout), d_s.requested) "retry"
+        FROM ({:s}) fr
+        INNER JOIN request_status AS reqs
+            ON fr.requestid = reqs.requestid
+        INNER JOIN domain_timeout AS dt
+            ON fr.domainid = dt.domainid
+        INNER JOIN domain_status AS d_s
+            ON fr.domainid = d_s.domainid AND fr.headerid = d_s.headerid
+        WHERE reqs.status = 1
         """.format(
-                Storage.query_requests_without_coded_responses(status_code),
-                Storage.DOMAINSTATUS_QUERY,
-                Storage.LATESTTIMEOUT_QUERY
+                Storage.FULLREQUEST_QUERY
             )
         
         with self._con as cur:
@@ -1048,24 +1272,22 @@ class Storage ():
         
         return df
     
-    def get_retryable_failing_request (self, status_code=200):
+    def get_retryable_failing_request (self):
         sql = """SELECT 
-            fresp.requestid, fresp.urlid, 
-            fresp.domainid, fresp.headerid,
-            fresp.scheme, fresp.netloc, 
-            fresp.path, fresp.query, 
-            fresp.header, fresp.date,
-            fresp.url
-        FROM ({:s}) fresp
-        INNER JOIN ({:s}) domstatus
-        ON fresp.domainid = domstatus.domainid AND fresp.headerid = domstatus.headerid
-        INNER JOIN ({:s}) ltimeouts
-        ON fresp.domainid = ltimeouts.domainid
-        WHERE ADDTIME(domstatus.requested, TIME_TO_SEC(ltimeouts.timeout)) <= NOW()
+            fr.requestid, fr.urlid, 
+            fr.domainid, fr.headerid,
+            fr.scheme, fr.netloc, 
+            fr.path, fr.query, 
+            fr.header, fr.date,
+            fr.url
+        FROM ({:s}) fr
+        INNER JOIN request_status AS rs
+            ON fr.requestid = rs.requestid AND rs.status = 1
+        INNER JOIN domain_retry AS dr
+            ON fr.domainid = dr.domainid AND fr.headerid = dr.headerid
+        WHERE dr.retry <= NOW() OR dr.retry IS NULL
         """.format(
-                Storage.query_requests_without_coded_responses(status_code),
-                Storage.DOMAINSTATUS_QUERY,
-                Storage.LATESTTIMEOUT_QUERY
+                Storage.FULLREQUEST_QUERY
             )
         
         with self._con as cur:
