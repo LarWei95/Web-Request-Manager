@@ -6,6 +6,7 @@ Created on 06.01.2022
 from webrequestmanager.model.storage import Storage, URL, RequestHeader, Request, Response
 from webrequestmanager.control.requesthandling import RequestHandler
 from webrequestmanager.control.api import WebRequestAPIClient
+from webrequestmanager.control.requester import HideMyNameProxyList
 import datetime as dt
 import requests
 from pprint import pprint
@@ -103,8 +104,14 @@ def client ():
     
     response = client.get_response(url, header, min_date, max_date)
     pprint(response)
+    
+def proxy ():
+    proxylist = HideMyNameProxyList()
+    proxylist.update_proxy_dataframe()
+    
+    print(proxylist.get_proxy_dataframe())
 
 if __name__ == '__main__':
-    client()
+    proxy()
     
     
