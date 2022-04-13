@@ -10,41 +10,56 @@ from webrequestmanager.control.api import WebRequestAPIClient
 import time
 import traceback as tb
 
-def get_app ():
-    app = Flask(__name__)
-    
-    @app.route("/")
-    def primary ():
-        first_param = request.args.get("number", type=int)
+class TestServer ():
+    def __init__ (self, name, port):
+        self.name = name
+        self.port = port
         
-        random_first = np.random.randint(0, 10)
+        self.app = Flask(self.name)
         
-        first_diff = first_param - random_first
-        
-        if first_diff < 0:
-            content = "Criteria not met."
-            status_code = 501
-        else:
-            content = "Criteria met."
-            status_code = 200
+        @self.app.route("/")
+        def primary ():
+            first_param = request.args.get("number", type=int)
             
-        return Response(content, status=status_code)
-    
-    return app
+            random_first = np.random.randint(0, 30)
+            
+            first_diff = first_param - random_first
+            
+            if first_diff < 0:
+                content = "Criteria not met."
+                status_code = 501
+            else:
+                content = "Criteria met."
+                status_code = 200
+                
+            return Response(content, status=status_code)
+        
+    def run (self):
+        self.app.run(port=self.port)
 
-def run_server_main ():
-    app = get_app()
-    print("Started server main.")
-    app.run(port=18141)
+def run_server_main (name, port):
+    try:
+        server = TestServer(name, port)
+        server.run()
+    except:
+        tb.print_exc()
 
-def run_client_main ():
+def run_client_main (ports):
     client = WebRequestAPIClient("http://127.0.0.1", 5000)
-    url_base = "http://127.0.0.1:18141"
+    url_base = "http://127.0.0.1:{:d}"
     print("Started client main.")
-    urls = [
-            url_base+"/?number={:d}".format(i)
-            for i in range(0, 20)
+    
+    urls = []
+    
+    for port in ports:
+        url = url_base.format(port)
+        
+        suburls = [
+            url+"/?number={:d}".format(i)
+            for i in range(0, 30)
         ]
+        urls.extend(suburls)
+    
     print("URLs: "+str(urls))
     
     try:
@@ -61,12 +76,23 @@ def run_client_main ():
     except:
         tb.print_exc()
     
-if __name__ == '__main__':
-    POOL = mp.Pool()
-    R1 = POOL.apply_async(run_server_main, tuple([]))
+def main ():
+    pool = mp.Pool()
+    ports = list(range(18140, 18148))
     
+    rs = [
+            pool.apply_async(run_server_main, tuple([__name__, port]))
+            for port in ports
+        ]
+        
     time.sleep(5)
-    R2 = POOL.apply_async(run_client_main, tuple([]))
     
-    R1.get()
-    R2.get()
+    rm = pool.apply_async(run_client_main, tuple([ports]))
+    
+    for r in rs:
+        r.get()
+        
+    rm.get()
+    
+if __name__ == '__main__':
+    main()

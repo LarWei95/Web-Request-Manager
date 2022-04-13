@@ -4,7 +4,6 @@ Created on 12.01.2022
 @author: larsw
 '''
 import mysql.connector
-from mysql.connector import RefreshOption
 from urllib.parse import urlparse
 import hashlib
 import numpy as np
@@ -13,6 +12,8 @@ import json
 from io import BytesIO
 import gzip
 import datetime as dt
+import time
+from threading import RLock
 
 class URL ():
     def __init__ (self, urlparsed, path_checksum, query_checksum):
@@ -78,6 +79,9 @@ class Response ():
             
         return Response(request, status_code, timestamp, headers, content)
     
+    def is_accepted (self, accepted_status_codes):
+        return self.status_code in accepted_status_codes
+    
 class _DBCon ():
     def __init__ (self, host, user, passwd, db_name):
         self._host = host
@@ -85,21 +89,42 @@ class _DBCon ():
         self._passwd = passwd
         self._db_name = db_name
         
+        self._lock = RLock()
         self._con = None
         
     def __enter__ (self):
-        self._con = mysql.connector.connect(
-                host=self._host,
-                user=self._user,
-                password=self._passwd,
-                database=self._db_name
-            )
-        return self._con.cursor()
+        self._lock.acquire(blocking=True)
+        
+        attempts = 1000
+        last_attempt = attempts - 1
+        
+        for attempt in range(attempts):
+            try:
+                self._con = mysql.connector.connect(
+                        host=self._host,
+                        user=self._user,
+                        password=self._passwd,
+                        database=self._db_name
+                    )
+                return self._con.cursor()
+            except Exception as e:
+                if attempt != last_attempt:
+                    if attempt % 100 == 0:
+                        print("Failed to connect - {:d}: {:s}".format(
+                                attempt, str(e)
+                            ))
+                        
+                    time.sleep(1)
+                else:
+                    raise e
+        
     
     def __exit__ (self, exc_type, exc_val, exc_tb):
         self._con.commit()
         self._con.close()
-    
+        self._lock.release()
+        
+        
 class Storage ():
     DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
     TIME_FORMAT = "%H:%M:%S"
@@ -227,7 +252,7 @@ class Storage ():
         self._user = user
         self._passwd = passwd
         self._db_name = db_name
-                
+        
         self._con = None
                 
         self._initialize()

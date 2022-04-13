@@ -13,6 +13,7 @@ import requests
 import datetime as dt
 import pandas as pd
 import time
+import traceback as tb
 
 URL_KEY = "url"
 HEADER_KEY = "header"
@@ -46,9 +47,9 @@ class WebRequestAPIServer ():
     # ? = %3F
     # / = %2F
     
-    def __init__ (self, storage):
+    def __init__ (self, storage, requester):
         self._storage = storage
-        self._handler = RequestHandler(self._storage)
+        self._handler = RequestHandler(requester, self._storage)
         
         self._app = Flask(__name__)
         self._register_callbacks(self._app)
@@ -142,9 +143,16 @@ class WebRequestAPIClient ():
         
     def post_page_request (self, url, header, accepted_status=200, min_date=None, max_date=None):
         params = WebRequestAPIClient.prepare_page_request_params(url, header, accepted_status, min_date, max_date)
-        
         r = requests.post(self._url, data=params)
-        request_id = json.loads(r.content.decode("utf-8"))[REQUESTID_KEY]
+        
+        try:
+            request_id = json.loads(r.content.decode("utf-8"))[REQUESTID_KEY]
+        except Exception as e:
+            print(e)
+            pprint(r)
+            tb.print_exc()
+            raise e
+        
         return request_id
     
     def _process_status_code (self, status_code):
@@ -161,7 +169,7 @@ class WebRequestAPIClient ():
             raise ValueError(errmsg)
         
         if request_id is None:
-            request_id = self.post_page_request(url, header, min_date, max_date)
+            request_id = self.post_page_request(url=url, header=header, min_date=min_date, max_date=max_date)
         
         params = {
             REQUESTID_KEY : request_id
