@@ -427,13 +427,19 @@ class Storage ():
         cur.execute(sql)
         
     def _create_full_request_view (self, cur):
-        sql = """CREATE VIEW IF NOT EXISTS full_request AS 
+        sql = "DROP VIEW IF EXISTS full_request;"
+        cur.execute(sql)
+
+        sql = """CREATE VIEW full_request AS 
         {:s};""".format(Storage.FULLREQUEST_QUERY)
         cur.execute(sql) 
            
     def _create_request_insert_trigger (self, cur):
+        sql = "DROP TRIGGER IF EXISTS insert_request_trigger;"
+        cur.execute(sql)
+
         sql = """
-        CREATE TRIGGER IF NOT EXISTS insert_request_trigger
+        CREATE TRIGGER insert_request_trigger
         AFTER INSERT
         ON request
         FOR EACH ROW
@@ -443,8 +449,11 @@ class Storage ():
         cur.execute(sql)
         
     def _create_response_insert_trigger (self, cur):
+        sql = "DROP TRIGGER IF EXISTS insert_response_trigger;"
+        cur.execute(sql)
+
         sql = """
-        CREATE TRIGGER IF NOT EXISTS insert_response_trigger
+        CREATE TRIGGER insert_response_trigger
         AFTER INSERT
         ON response
         FOR EACH ROW
@@ -457,8 +466,11 @@ class Storage ():
         cur.execute(sql)
         
     def _create_request_status_insert_trigger (self, cur):
+        sql = "DROP TRIGGER IF EXISTS insert_request_status_trigger;"
+        cur.execute(sql)
+
         sql = """
-        CREATE TRIGGER IF NOT EXISTS insert_request_status_trigger
+        CREATE TRIGGER insert_request_status_trigger
         AFTER INSERT
         ON request_status
         FOR EACH ROW
@@ -474,8 +486,11 @@ class Storage ():
         cur.execute(sql)
         
     def _create_request_status_update_trigger (self, cur):
+        sql = "DROP TRIGGER IF EXISTS update_request_status_trigger;"
+        cur.execute(sql)
+
         sql = """
-        CREATE TRIGGER IF NOT EXISTS update_request_status_trigger
+        CREATE TRIGGER update_request_status_trigger
         AFTER UPDATE
         ON request_status
         FOR EACH ROW
@@ -497,8 +512,12 @@ class Storage ():
     def _create_domain_status_update_trigger (self, cur):
         # domainid, headerid, requested, status
         # TIMESTAMPADD(SECOND, TIME_TO_SEC(dt.timeout), d_s.requested) "retry"
+        sql = "DROP TRIGGER IF EXISTS insert_domain_status_trigger;"
+        cur.execute(sql)
+
+
         sql = """
-        CREATE TRIGGER IF NOT EXISTS insert_domain_status_trigger
+        CREATE TRIGGER insert_domain_status_trigger
         AFTER UPDATE
         ON domain_status
         FOR EACH ROW

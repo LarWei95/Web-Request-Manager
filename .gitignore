@@ -133,3 +133,4 @@ dmypy.json
 Test.html
 Test.txt
 credentials.json
+*.txt
