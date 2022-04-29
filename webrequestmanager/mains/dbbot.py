@@ -11,7 +11,7 @@ import time
 import datetime as dt
 
 def main():
-    with open("../../credentials.json", "r") as f:
+    with open("credentials.json", "r") as f:
         credentials = json.load(f)
     
     host = "localhost"

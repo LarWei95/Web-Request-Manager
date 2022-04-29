@@ -132,7 +132,7 @@ class RequestHandler():
                 # time.sleep(1.0)
             
         if counter != 0:
-            print("Pending: {:d}/{:d}".format(accepted_counter, counter))
+            self._logger.info("Pending: {:d}/{:d}".format(accepted_counter, counter))
             
         self._logger.info("Done PendingRequests")
             
@@ -176,7 +176,7 @@ class RequestHandler():
                 # time.sleep(1.0)
             
         if counter != 0:
-            print("Failing: {:d}/{:d}".format(accepted_counter, counter))
+            self._logger.info("Failing: {:d}/{:d}".format(accepted_counter, counter))
             
         self._logger.info("Done FailingRequests")
             
@@ -188,9 +188,10 @@ class RequestHandler():
         executed_pending_requests = self._execute_pending_requests()
         executed_failing_requests = self.execute_failing_requests()
         
-        print(filled_timeouts, executed_pending_requests, executed_failing_requests)
+        msg = f"Execute requests: {filled_timeouts}, {executed_pending_requests}, {executed_failing_requests}"
+        self._logger.info(msg)
+
         made_changes = filled_timeouts | executed_pending_requests | executed_failing_requests
-        self._logger.info("Done ExecuteRequests.")
         
         return made_changes
         
