@@ -1,0 +1,15 @@
+[Unit]
+Description=WebRequestManager Database Bot
+After=mysql.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=300
+User=esprimo
+ExecStartPre=/bin/sleep 10
+ExecStart=/home/esprimo/Projekte/WebRequestManager/dbbot_start.sh
+
+[Install]
+WantedBy=multi-user.target

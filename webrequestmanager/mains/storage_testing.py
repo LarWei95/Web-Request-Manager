@@ -8,17 +8,6 @@ from webrequestmanager.control.api import WebRequestAPIServer
 from webrequestmanager.control.requester import Requester
 import json
 
-
-def run_api (host, user, password):
-    storage = Storage(host, user, password)
-    
-    # proxy_manager = ProxyManager(HideMyNameProxyList())
-    proxy_manager = None
-    requester = Requester(proxy_manager)
-    
-    server = WebRequestAPIServer(requester, storage)
-    server.run()
-
 def main ():
     with open("credentials.json", "r") as f:
         credentials = json.load(f)
@@ -27,7 +16,10 @@ def main ():
     user = credentials["user"]
     password = credentials["password"]
     
-    run_api(host, user, password)
+    storage = Storage(host, user, password)
     
+    # storage.direct_insert_domain_policy(3, retries=5, retry_mindelay=1, retry_maxdelay=5)
+    # storage.direct_insert_domain_policy(4, retries=5, retry_mindelay=1, retry_maxdelay=5)
+    print(storage.get_domain_policy())
 if __name__ == '__main__':
     main()

@@ -283,27 +283,32 @@ class Requester ():
         self._proxy_manager = proxy_manager
         self._session = requests.Session()
         self._cookies = None
-        
+    
+    def _prepare_accepted_status_codes (self, accepted_status_codes):
+        if isinstance(accepted_status_codes, (list, tuple)):
+            accepted_status_codes = set(accepted_status_codes)
+        else:
+            accepted_status_codes = set([accepted_status_codes])
+
+        return accepted_status_codes
+
+
     def _response_valid (self, response, accepted_status_codes):
         if response is None:
             return False
         else:
             return response.status_code in accepted_status_codes
         
-    def _request (self, url, header, allow_redirects, proxy_dict=None):
+    def _request (self, url, header, allow_redirects, timeout, proxy_dict=None):
         try:
             # r2 = s.get(..., cookies=r1.cookies)
-            d = dt.datetime.now()
-            '''
-            r = self._session.get(url, headers=header, 
-                      proxies=proxy_dict, allow_redirects=allow_redirects,
-                      cookies=self._cookies)
-            '''
+            d = dt.datetime.utcnow()
+
             for _ in range(3):
                 try:
                     r = requests.get(url, headers=header, 
                               proxies=proxy_dict, allow_redirects=allow_redirects,
-                              timeout=10)
+                              timeout=timeout)
                 except requests.exceptions.ConnectionError as e:
                     r = None
                 except requests.exceptions.ReadTimeout as e:
@@ -315,15 +320,14 @@ class Requester ():
                 d = None
             else:
                 # self._cookies = r.cookies                
-                d = (dt.datetime.now() - d).total_seconds() * 1000
-            
+                d = (dt.datetime.utcnow() - d).total_seconds() * 1000
             
             return r, d
         except:
-            # tb.print_exc()
+            tb.print_exc()
             return None, None
     
-    def _proxy_request (self, url, header, accepted_status_codes):
+    def _proxy_request (self, url, header, accepted_status_codes, timeout):
         # Returns: Result of requests.get(...) / requests.Session().get(...)
         allow_redirects = 301 not in accepted_status_codes
         url = url.replace("https:", "http:")
@@ -331,22 +335,14 @@ class Requester ():
         
         sorted_data = self._proxy_manager.get_proxy_data().sort_values(by=ProxyManager.DELAY_COLUMN)
         available_protocols = sorted_data.index.get_level_values(ProxyList.TYPE_INDEX).unique()
-        
-        '''
-        if required_protocol == "https" and required_protocol not in available_protocols:
-            required_protocol = "http"
-            url = url.replace("https:", "http:")
-        ''' 
         sorted_data = sorted_data.xs(required_protocol, level=ProxyList.TYPE_INDEX)
         
-        print("Sorted Proxy Data:\n"+str(sorted_data))
-        # IMPROVE THIS!
         for indx_value in sorted_data.index:
             proxy_url = "{:s}://{:s}:{:s}".format(required_protocol, indx_value[0], indx_value[1])
-            print(proxy_url)
             proxy_dict = {required_protocol : proxy_url}
             
-            response, duration = self._request(url, header, allow_redirects, proxy_dict)
+            response, duration = self._request(url, header, allow_redirects, timeout,
+                                               proxy_dict=proxy_dict)
             
             if response is None:
                 self._proxy_manager.set_proxy_data_delay(required_protocol, 
@@ -361,22 +357,20 @@ class Requester ():
                                                          duration)
                 
             if response.status_code in accepted_status_codes:
-                print("Success with: "+proxy_url)
-                return response
+                return response, duration
             
-        return None
+        return None, None
             
-    def _direct_request (self, url, header, accepted_status_codes):
+    def _direct_request (self, url, header, accepted_status_codes, timeout):
         # Returns: Result of requests.get(...) / requests.Session().get(...)
         allow_redirects = 301 not in accepted_status_codes
         
-        response, _ = self._request(url, header, allow_redirects, None)
-        
-        # pprint(dict(response.request.headers))
-        
-        return response
+        response, secs = self._request(url, header, allow_redirects, timeout, 
+                                    proxy_dict=None)
+                
+        return response, secs
             
-    def request (self, url, header, accepted_status_codes):
+    def old_request (self, url, header, accepted_status_codes):
         if isinstance(accepted_status_codes, (list, tuple)):
             accepted_status_codes = set(accepted_status_codes)
         else:
@@ -405,4 +399,23 @@ class Requester ():
                     return main_response
                 
         return main_response
-        
+       
+
+    def request (self, url, header, accepted_status_codes,
+                        timeout, force_proxy):
+        accepted_status_codes = self._prepare_accepted_status_codes(accepted_status_codes)
+
+        if force_proxy:
+            if self._proxy_manager is None:
+                errmsg = "Proxy usage is forced by default, but no manager is given."
+                raise ValueError(errmsg)
+            
+            response, secs = self._proxy_request(url, header,
+                                                 accepted_status_codes, timeout)
+        else:
+            response, secs = self._direct_request(url, header, 
+                                                  accepted_status_codes, timeout)
+
+        valid = self._response_valid(response, accepted_status_codes)
+
+        return response, secs, valid

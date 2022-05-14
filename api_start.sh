@@ -1,0 +1,22 @@
+#!/bin/bash
+LOGBASE="DBAPI_";
+DTFORMAT="+%Y%m%d-%H-%M-%S";
+DT="$(date $DTFORMAT)";
+LOGEXT="log";
+LOGFILENAME=$LOGBASE$DT"."$LOGEXT;
+
+EXECFILE="server_main.py";
+
+BASHFILE="${BASH_SOURCE[0]}";
+BASHABSFILE="$(realpath $BASHFILE)";
+BASHABSDIR="$(dirname $BASHABSFILE)";
+
+cd $BASHABSDIR;
+
+LOGFILE=$BASHABSDIR"/logs/"$LOGFILENAME;
+
+export PYTHONPATH=$PYTHONPATH:$BASHABSDIR;
+
+FULLPATH=$BASHABSDIR"/webrequestmanager/mains/"$EXECFILE;
+
+exec python3 $FULLPATH &> $LOGFILE;

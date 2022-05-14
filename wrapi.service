@@ -1,0 +1,15 @@
+[Unit]
+Description=WebRequestManager API
+After=mysql.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Restart=on-failure
+RestartSec=300
+User=esprimo
+ExecStartPre=/bin/sleep 5
+ExecStart=/home/esprimo/Projekte/WebRequestManager/api_start.sh
+
+[Install]
+WantedBy=multi-user.target

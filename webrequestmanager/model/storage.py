@@ -199,7 +199,7 @@ class Storage ():
         INNER JOIN response AS resp
             ON req.requestid = resp.requestid
         INNER JOIN accepted_status AS a_s
-            ON req.requestid = a_s.requestid AND resp.statuscode = a_s.statuscode) x
+            ON req.requestid = a_s.requestid AND resp.statuscode = a_s.status
     ON req.requestid = x.requestid
     LEFT JOIN (SELECT req.requestid, COUNT(resp.responseid) "response_count"
                 FROM request AS req
@@ -243,8 +243,33 @@ class Storage ():
     ON x.requestid = y.requestid AND x.requested = y.requested
     """
     
+    # Query for getting all responses for completed requests
+    # which did not match any accepted http status codes.
+    FAILED_RESPONSES_QUERY = """SELECT resp.requestid, resp.responseid
+    FROM response AS resp
+    INNER JOIN request_status AS reqs
+        ON resp.requestid = reqs.requestid
+    WHERE reqs.status = 2 AND resp.statuscode NOT IN (
+        SELECT acs.statuscode
+        FROM accepted_status AS acs
+        WHERE acs.requestid = resp.requestid
+    )"""
     
-    
+    DOMAIN_POLICY_QUERY = """
+    SELECT domainid, timeout, retries, retry_mindelay, retry_maxdelay,
+        retry_http, retry_proxies, bpslimit, proxy_default, proxy_regions
+    FROM domain_policy
+    """
+    DOMAIN_POLICY_COLUMNS = ["DomainId", "Timeout", "Retries", "RetryMinDelay",
+            "RetryMaxDelay", "RetryHTTP", "RetryProxies", "BPSLimit", "ProxyDefault",
+            "ProxyRegions"]
+    DOMAIN_POLICY_INDEX = "DomainId"
+
+    REQUESTSTATUS_QUERY = """SELECT requestid, requested, status
+    FROM request_status"""
+    REQUESTSTATUS_COLUMNS = ["RequestId", "Requested", "Status"]
+    REQUESTSTATUS_INDEX = "RequestId"
+
     URLPARSE_REVERT = "{:s}://{:s}{:s}{:s}"
     
     def __init__ (self, host, user, passwd, db_name="webrequest"):
@@ -277,7 +302,30 @@ class Storage ():
             CONSTRAINT scheme_netloc_pair UNIQUE (scheme, netloc)
         );"""
         cur.execute(sql)
-        
+    
+    def _create_domain_policy_table (self, cur):
+        sql = """CREATE TABLE IF NOT EXISTS domain_policy (
+            domainid INTEGER UNSIGNED PRIMARY KEY,
+            timeout SMALLINT UNSIGNED DEFAULT 30,
+
+            retries TINYINT UNSIGNED DEFAULT 2,
+            retry_mindelay SMALLINT UNSIGNED DEFAULT 0,
+            retry_maxdelay SMALLINT UNSIGNED DEFAULT 0,
+            retry_http TINYINT UNSIGNED DEFAULT 0,
+            retry_proxies TINYINT UNSIGNED DEFAULT 0,
+
+            bpslimit INT UNSIGNED DEFAULT NULL,
+
+            proxy_default TINYINT UNSIGNED DEFAULT 0,
+            proxy_regions TEXT NULL,
+
+            FOREIGN KEY (domainid)
+                REFERENCES domain(domainid)
+                    ON DELETE CASCADE
+                    ON UPDATE NO ACTION
+        );"""
+        cur.execute(sql)
+
     def _create_url_table (self, cur):        
         sql = """CREATE TABLE IF NOT EXISTS url (
             urlid INTEGER UNSIGNED AUTO_INCREMENT,
@@ -433,7 +481,19 @@ class Storage ():
         sql = """CREATE VIEW full_request AS 
         {:s};""".format(Storage.FULLREQUEST_QUERY)
         cur.execute(sql) 
-           
+    
+    def _create_domain_insert_trigger (self, cur):
+        sql = "DROP TRIGGER IF EXISTS insert_domain_trigger;"
+        cur.execute(sql)
+
+        sql = """CREATE TRIGGER insert_domain_trigger
+        AFTER INSERT
+        ON domain
+        FOR EACH ROW
+        INSERT INTO domain_policy (domainid) VALUES (NEW.domainid);
+        """
+        cur.execute(sql)
+
     def _create_request_insert_trigger (self, cur):
         sql = "DROP TRIGGER IF EXISTS insert_request_trigger;"
         cur.execute(sql)
@@ -540,6 +600,7 @@ class Storage ():
         
         with self._con as cur:
             self._create_domain_table(cur)
+            self._create_domain_policy_table(cur)
             self._create_url_table(cur)
             
             self._create_request_header_table(cur)
@@ -553,6 +614,7 @@ class Storage ():
             
             self._create_full_request_view(cur)
             
+            self._create_domain_insert_trigger(cur)
             self._create_request_insert_trigger(cur)
             self._create_response_insert_trigger(cur)
             self._create_request_status_insert_trigger(cur)
@@ -661,6 +723,84 @@ class Storage ():
             else:
                 return existing_ids
             
+    def direct_insert_domain_policy (self, domain_id, timeout=None, retries=None,
+                                    retry_mindelay=None, retry_maxdelay=None,
+                                    retry_http=None, retry_proxies=None,
+                                    bps_limit=None, proxy_default=None,
+                                    proxy_regions=None):
+        sql = """INSERT INTO domain_policy {:s} 
+                VALUES {:s}  {:s};"""
+
+        column_list = ["domainid"]
+        value_list = [str(domain_id)]        
+        bool_to_str = lambda x: "1" if x == True else "0"
+
+        if timeout is not None:
+            column_list.append("timeout")
+            value_list.append(str(timeout))    
+
+        if retries is not None:
+            column_list.append("retries")
+            value_list.append(str(retries))
+
+        if retry_mindelay is not None:
+            column_list.append("retry_mindelay")
+            value_list.append(str(retry_mindelay))
+
+        if retry_maxdelay is not None:
+            column_list.append("retry_maxdelay")
+            value_list.append(str(retry_maxdelay))
+
+        if retry_http is not None:
+            column_list.append("retry_http")
+            value_list.append(bool_to_str(retry_http))
+
+        if retry_proxies is not None:
+            column_list.append("retry_proxies")
+            value_list.append(bool_to_str(retry_proxies))
+
+        if bps_limit is not None:
+            bps_limit = "NULL" if bps_limit < 0 else f"\"{bps_limit}\""
+            column_list.append("bpslimit")
+            value_list.append(bps_limit)
+
+        if proxy_default is not None:
+            column_list.append("proxy_default")
+            value_list.append(bool_to_str(proxy_default))
+
+        if proxy_regions is not None:
+            column_list.append("proxy_regions")
+            value_list.append(f"\"{proxy_regions}\"")
+
+        value_list = "({:s})".format(",".join(value_list))
+
+        if len(column_list) > 1:
+            update = ",".join("{:s} = VALUES({:s})".format(x, x) for x in column_list[1:])
+            update = "ON DUPLICATE KEY UPDATE "+update
+        else:
+            update = ""
+    
+        column_list = "({:s})".format(",".join(column_list))
+
+        sql = sql.format(column_list, value_list, update)
+
+        with self._con as cur:
+            cur.execute(sql)
+    
+    def get_domain_policy (self):
+        sql = "{:s};".format(Storage.DOMAIN_POLICY_QUERY)
+
+        with self._con as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
+
+        df = pd.DataFrame(rows, columns=Storage.DOMAIN_POLICY_COLUMNS)
+        df = df.set_index(Storage.DOMAIN_POLICY_INDEX)
+        return df
+
+
+
+
     def direct_insert_url (self, domain_id, url):
         sql = """INSERT INTO url (domainid, pathchecksum, querychecksum, path, query)
         VALUES {:s};"""
@@ -899,8 +1039,8 @@ class Storage ():
         else:
             last_id = []
             
-            for ui, hi in zip(url_id, header_id):
-                last_id.append(self.direct_insert_request(ui, hi))
+            for ui, hi, ts in zip(url_id, header_id, timestamp):
+                last_id.append(self.direct_insert_request(ui, hi, ts))
                 
             last_id = np.array(last_id)
             
@@ -1193,7 +1333,10 @@ class Storage ():
         FROM request_status AS rs
         INNER JOIN ({:s}) fr
             ON rs.requestid = fr.requestid
-        WHERE rs.status = 0;
+        LEFT JOIN domain_retry AS dr
+            ON fr.domainid = dr.domainid AND fr.headerid = dr.headerid
+        WHERE rs.status = 0 
+            AND (dr.retry <= UTC_TIMESTAMP() OR dr.retry IS NULL);
         """.format(Storage.FULLREQUEST_QUERY)
         
         with self._con as cur:
@@ -1327,9 +1470,9 @@ class Storage ():
         FROM ({:s}) fr
         INNER JOIN request_status AS rs
             ON fr.requestid = rs.requestid AND rs.status = 1
-        INNER JOIN domain_retry AS dr
+        LEFT JOIN domain_retry AS dr
             ON fr.domainid = dr.domainid AND fr.headerid = dr.headerid
-        WHERE dr.retry <= NOW() OR dr.retry IS NULL
+        WHERE dr.retry <= UTC_TIMESTAMP() OR dr.retry IS NULL
         """.format(
                 Storage.FULLREQUEST_QUERY
             )
@@ -1341,3 +1484,27 @@ class Storage ():
         df = Storage._prepare_fullrequest_dataframe(rows)
         
         return df
+
+    def get_request_status(self):
+        sql = "{:s};".format(Storage.REQUESTSTATUS_QUERY)
+        
+        with self._con as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
+
+        df = pd.DataFrame(rows, columns=Storage.REQUESTSTATUS_COLUMNS)
+        df = df.set_index(Storage.REQUESTSTATUS_INDEX)
+        return df
+
+    def fill_missing_request_statuses(self):
+        sql = """INSERT INTO request_status (requestid, requested, status)
+        SELECT r.requestid, r.date, 0
+        FROM request AS r
+        LEFT JOIN request_status AS rs
+            ON r.requestid = rs.requestid
+        WHERE rs.requestid IS NULL;"""
+
+        with self._con as cur:
+            cur.execute(sql)
+
+
